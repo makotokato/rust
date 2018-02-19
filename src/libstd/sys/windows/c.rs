@@ -15,7 +15,7 @@
 #![unstable(issue = "0", feature = "windows_c")]
 
 use os::raw::{c_int, c_uint, c_ulong, c_long, c_longlong, c_ushort, c_char};
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_pointer_width = "64")]
 use os::raw::c_ulonglong;
 use libc::{wchar_t, size_t, c_void};
 use ptr;
@@ -42,9 +42,9 @@ pub type WORD = u16;
 pub type CHAR = c_char;
 pub type ULONG_PTR = usize;
 pub type ULONG = c_ulong;
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_pointer_width = "64")]
 pub type ULONGLONG = u64;
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_pointer_width = "64")]
 pub type DWORDLONG = ULONGLONG;
 
 pub type LPBOOL = *mut BOOL;
@@ -280,6 +280,9 @@ pub const IMAGE_FILE_MACHINE_I386: DWORD = 0x014c;
 #[cfg(target_arch = "x86_64")]
 #[cfg(feature = "backtrace")]
 pub const IMAGE_FILE_MACHINE_AMD64: DWORD = 0x8664;
+#[cfg(target_arch = "aarch64")]
+#[cfg(feature = "backtrace")]
+pub const IMAGE_FILE_MACHINE_ARM64: DWORD = 0xaa64;
 
 pub const EXCEPTION_CONTINUE_SEARCH: LONG = 0;
 pub const EXCEPTION_STACK_OVERFLOW: DWORD = 0xc00000fd;
@@ -768,12 +771,71 @@ pub struct FLOATING_SAVE_AREA {
     _Dummy: [u8; 512] // FIXME: Fill this out
 }
 
+#[cfg(target_arch = "aarch64")]
+#[repr(C, align(16))]
+pub struct CONTEXT {
+    pub ContextFlags: DWORD,
+
+    pub Cpsr: DWORD,
+
+    pub X0: DWORDLONG,
+    pub X1: DWORDLONG,
+    pub X2: DWORDLONG,
+    pub X3: DWORDLONG,
+    pub X4: DWORDLONG,
+    pub X5: DWORDLONG,
+    pub X6: DWORDLONG,
+    pub X7: DWORDLONG,
+    pub X8: DWORDLONG,
+    pub X9: DWORDLONG,
+    pub X10: DWORDLONG,
+    pub X11: DWORDLONG,
+    pub X12: DWORDLONG,
+    pub X13: DWORDLONG,
+    pub X14: DWORDLONG,
+    pub X15: DWORDLONG,
+    pub X16: DWORDLONG,
+    pub X17: DWORDLONG,
+    pub X18: DWORDLONG,
+    pub X19: DWORDLONG,
+    pub X20: DWORDLONG,
+    pub X21: DWORDLONG,
+    pub X22: DWORDLONG,
+    pub X23: DWORDLONG,
+    pub X24: DWORDLONG,
+    pub X25: DWORDLONG,
+    pub X26: DWORDLONG,
+    pub X27: DWORDLONG,
+    pub X28: DWORDLONG,
+    pub Fp: DWORDLONG,
+    pub Lr: DWORDLONG,
+
+    pub Sp: DWORDLONG,
+    pub Pc: DWORDLONG,
+
+    pub VectorRegister: [NEON128; 32],
+    pub Fpcr: DWORD,
+    pub Fpsr: DWORD,
+
+    pub Bcr: [DWORD; 8],
+    pub Bvr: [DWORD; 8],
+    pub Wcr: [DWORD; 2],
+    pub Wvr: [DWORD; 2]
+}
+
+#[cfg(target_arch = "aarch64")]
+#[repr(C, align(16))]
+pub struct NEON128 {
+    pub Low: c_ulonglong,
+    pub High: c_ulonglong
+}
+
 // FIXME(#43348): This structure is used for backtrace only, and a fake
 // definition is provided here only to allow rustdoc to pass type-check. This
 // will not appear in the final documentation. This should be also defined for
 // other architectures supported by Windows such as ARM, and for historical
 // interest, maybe MIPS and PowerPC as well.
-#[cfg(all(dox, not(any(target_arch = "x86_64", target_arch = "x86"))))]
+#[cfg(all(dox, not(any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64"))))]
 pub enum CONTEXT {}
 
 #[repr(C)]

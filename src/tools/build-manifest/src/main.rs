@@ -51,6 +51,7 @@ static TARGETS: &'static [&'static str] = &[
     "aarch64-unknown-fuchsia",
     "aarch64-unknown-linux-gnu",
     "aarch64-unknown-linux-musl",
+    "aarch64-pc-windows-msvc",
     "arm-linux-androideabi",
     "arm-unknown-linux-gnueabi",
     "arm-unknown-linux-gnueabihf",

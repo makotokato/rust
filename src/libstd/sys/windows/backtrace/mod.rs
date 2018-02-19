@@ -140,6 +140,18 @@ fn init_frame(frame: &mut c::STACKFRAME_EX,
     c::IMAGE_FILE_MACHINE_AMD64
 }
 
+#[cfg(target_arch = "aarch64")]
+fn init_frame(frame: &mut c::STACKFRAME_EX,
+              ctx: &c::CONTEXT) -> c::DWORD {
+    frame.AddrPC.Offset = ctx.Pc as u64;
+    frame.AddrPC.Mode = c::ADDRESS_MODE::AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Sp as u64;
+    frame.AddrStack.Mode = c::ADDRESS_MODE::AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Fp as u64;
+    frame.AddrFrame.Mode = c::ADDRESS_MODE::AddrModeFlat;
+    c::IMAGE_FILE_MACHINE_ARM64
+}
+
 pub struct BacktraceContext {
     handle: c::HANDLE,
     SymCleanup: SymCleanupFn,
