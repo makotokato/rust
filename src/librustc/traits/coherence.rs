@@ -8,7 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! See `README.md` for high-level documentation
+//! See rustc guide chapters on [trait-resolution] and [trait-specialization] for more info on how
+//! this works.
+//!
+//! [trait-resolution]: https://rust-lang-nursery.github.io/rustc-guide/trait-resolution.html
+//! [trait-specialization]: https://rust-lang-nursery.github.io/rustc-guide/trait-specialization.html
 
 use hir::def_id::{DefId, LOCAL_CRATE};
 use syntax_pos::DUMMY_SP;
@@ -88,7 +92,9 @@ fn with_fresh_ty_vars<'cx, 'gcx, 'tcx>(selcx: &mut SelectionContext<'cx, 'gcx, '
                                        -> ty::ImplHeader<'tcx>
 {
     let tcx = selcx.tcx();
-    let impl_substs = selcx.infcx().fresh_substs_for_item(DUMMY_SP, impl_def_id);
+    let impl_substs = selcx.infcx().fresh_substs_for_item(param_env.universe,
+                                                          DUMMY_SP,
+                                                          impl_def_id);
 
     let header = ty::ImplHeader {
         impl_def_id,

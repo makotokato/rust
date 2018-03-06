@@ -231,7 +231,7 @@ pub struct ShouldRun<'a> {
     paths: BTreeSet<PathSet>,
 
     // If this is a default rule, this is an additional constraint placed on
-    // it's run. Generally something like compiler docs being enabled.
+    // its run. Generally something like compiler docs being enabled.
     is_really_default: bool,
 }
 
@@ -316,7 +316,7 @@ impl<'a> Builder<'a> {
                 tool::UnstableBookGen, tool::Tidy, tool::Linkchecker, tool::CargoTest,
                 tool::Compiletest, tool::RemoteTestServer, tool::RemoteTestClient,
                 tool::RustInstaller, tool::Cargo, tool::Rls, tool::Rustdoc, tool::Clippy,
-                native::Llvm, tool::Rustfmt, tool::Miri),
+                native::Llvm, tool::Rustfmt, tool::Miri, native::Lld),
             Kind::Check => describe!(check::Std, check::Test, check::Rustc),
             Kind::Test => describe!(test::Tidy, test::Bootstrap, test::Ui, test::RunPass,
                 test::CompileFail, test::ParseFail, test::RunFail, test::RunPassValgrind,
@@ -326,7 +326,9 @@ impl<'a> Builder<'a> {
                 test::RunPassPretty, test::RunFailPretty, test::RunPassValgrindPretty,
                 test::RunPassFullDepsPretty, test::RunFailFullDepsPretty, test::RunMake,
                 test::Crate, test::CrateLibrustc, test::Rustdoc, test::Linkcheck, test::Cargotest,
-                test::Cargo, test::Rls, test::Docs, test::ErrorIndex, test::Distcheck,
+                test::Cargo, test::Rls, test::ErrorIndex, test::Distcheck,
+                test::Nomicon, test::Reference, test::RustdocBook, test::RustByExample,
+                test::TheBook, test::UnstableBook,
                 test::Rustfmt, test::Miri, test::Clippy, test::RustdocJS, test::RustdocTheme),
             Kind::Bench => describe!(test::Crate, test::CrateLibrustc),
             Kind::Doc => describe!(doc::UnstableBook, doc::UnstableBookGen, doc::TheBook,
@@ -444,10 +446,11 @@ impl<'a> Builder<'a> {
 
             fn run(self, builder: &Builder) -> Interned<PathBuf> {
                 let compiler = self.compiler;
-                let lib = if compiler.stage >= 1 && builder.build.config.libdir.is_some() {
-                    builder.build.config.libdir.clone().unwrap()
+                let config = &builder.build.config;
+                let lib = if compiler.stage >= 1 && config.libdir_relative().is_some() {
+                    builder.build.config.libdir_relative().unwrap()
                 } else {
-                    PathBuf::from("lib")
+                    Path::new("lib")
                 };
                 let sysroot = builder.sysroot(self.compiler).join(lib)
                     .join("rustlib").join(self.target).join("lib");
@@ -461,7 +464,7 @@ impl<'a> Builder<'a> {
 
     pub fn sysroot_codegen_backends(&self, compiler: Compiler) -> PathBuf {
         self.sysroot_libdir(compiler, compiler.host)
-            .with_file_name("codegen-backends")
+            .with_file_name(self.build.config.rust_codegen_backends_dir.clone())
     }
 
     /// Returns the compiler's libdir where it stores the dynamic libraries that
@@ -598,6 +601,9 @@ impl<'a> Builder<'a> {
         if let Some(target_linker) = self.build.linker(target) {
             cargo.env("RUSTC_TARGET_LINKER", target_linker);
         }
+        if let Some(ref error_format) = self.config.rustc_error_format {
+            cargo.env("RUSTC_ERROR_FORMAT", error_format);
+        }
         if cmd != "build" && cmd != "check" {
             cargo.env("RUSTDOC_LIBDIR", self.rustc_libdir(self.compiler(2, self.build.build)));
         }
@@ -682,9 +688,25 @@ impl<'a> Builder<'a> {
         //
         // FIXME: the guard against msvc shouldn't need to be here
         if !target.contains("msvc") {
-            let cc = self.cc(target);
-            cargo.env(format!("CC_{}", target), cc)
-                 .env("CC", cc);
+            let ccache = self.config.ccache.as_ref();
+            let ccacheify = |s: &Path| {
+                let ccache = match ccache {
+                    Some(ref s) => s,
+                    None => return s.display().to_string(),
+                };
+                // FIXME: the cc-rs crate only recognizes the literal strings
+                // `ccache` and `sccache` when doing caching compilations, so we
+                // mirror that here. It should probably be fixed upstream to
+                // accept a new env var or otherwise work with custom ccache
+                // vars.
+                match &ccache[..] {
+                    "ccache" | "sccache" => format!("{} {}", ccache, s.display()),
+                    _ => s.display().to_string(),
+                }
+            };
+            let cc = ccacheify(&self.cc(target));
+            cargo.env(format!("CC_{}", target), &cc)
+                 .env("CC", &cc);
 
             let cflags = self.cflags(target).join(" ");
             cargo.env(format!("CFLAGS_{}", target), cflags.clone())
@@ -699,8 +721,9 @@ impl<'a> Builder<'a> {
             }
 
             if let Ok(cxx) = self.cxx(target) {
-                cargo.env(format!("CXX_{}", target), cxx)
-                     .env("CXX", cxx)
+                let cxx = ccacheify(&cxx);
+                cargo.env(format!("CXX_{}", target), &cxx)
+                     .env("CXX", &cxx)
                      .env(format!("CXXFLAGS_{}", target), cflags.clone())
                      .env("CXXFLAGS", cflags);
             }

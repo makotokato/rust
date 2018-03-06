@@ -36,7 +36,7 @@ use std::hash::Hash;
 use std::io::prelude::*;
 use std::io::Cursor;
 use std::path::Path;
-use std::rc::Rc;
+use rustc_data_structures::sync::Lrc;
 use std::u32;
 use syntax::ast::{self, CRATE_NODE_ID};
 use syntax::codemap::Spanned;
@@ -60,7 +60,7 @@ pub struct EncodeContext<'a, 'tcx: 'a> {
     predicate_shorthands: FxHashMap<ty::Predicate<'tcx>, usize>,
 
     // This is used to speed up Span encoding.
-    filemap_cache: Rc<FileMap>,
+    filemap_cache: Lrc<FileMap>,
 }
 
 macro_rules! encoder_methods {
@@ -323,7 +323,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 // paths because any relative paths are potentially relative to
                 // a wrong directory.
                 // However, if a path has been modified via
-                // `-Zremap-path-prefix` we assume the user has already set
+                // `--remap-path-prefix` we assume the user has already set
                 // things up the way they want and don't touch the path values
                 // anymore.
                 match filemap.name {
@@ -342,7 +342,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                                 adapted.name.hash(&mut hasher);
                                 hasher.finish()
                             };
-                            Rc::new(adapted)
+                            Lrc::new(adapted)
                         }
                     },
                     // expanded code, not from a file

@@ -127,7 +127,7 @@ fn type_check_internal<'gcx, 'tcx>(
     mir: &Mir<'tcx>,
     region_bound_pairs: &[(ty::Region<'tcx>, GenericKind<'tcx>)],
     implicit_region_bound: Option<ty::Region<'tcx>>,
-    extra: &mut FnMut(&mut TypeChecker<'_, 'gcx, 'tcx>),
+    extra: &mut dyn FnMut(&mut TypeChecker<'_, 'gcx, 'tcx>),
 ) -> MirTypeckRegionConstraints<'tcx> {
     let mut checker = TypeChecker::new(
         infcx,
@@ -231,7 +231,7 @@ impl<'a, 'b, 'gcx, 'tcx> TypeVerifier<'a, 'b, 'gcx, 'tcx> {
         self.cx.infcx.tcx
     }
 
-    fn sanitize_type(&mut self, parent: &fmt::Debug, ty: Ty<'tcx>) -> Ty<'tcx> {
+    fn sanitize_type(&mut self, parent: &dyn fmt::Debug, ty: Ty<'tcx>) -> Ty<'tcx> {
         if ty.has_escaping_regions() || ty.references_error() {
             span_mirbug_and_err!(self, parent, "bad type {:?}", ty)
         } else {
@@ -516,7 +516,7 @@ impl<'a, 'b, 'gcx, 'tcx> TypeVerifier<'a, 'b, 'gcx, 'tcx> {
 
     fn field_ty(
         &mut self,
-        parent: &fmt::Debug,
+        parent: &dyn fmt::Debug,
         base_ty: PlaceTy<'tcx>,
         field: Field,
         location: Location,
@@ -1171,7 +1171,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
     fn assert_iscleanup(
         &mut self,
         mir: &Mir<'tcx>,
-        ctxt: &fmt::Debug,
+        ctxt: &dyn fmt::Debug,
         bb: BasicBlock,
         iscleanuppad: bool,
     ) {
@@ -1584,6 +1584,12 @@ impl MirPass for TypeckMir {
         let def_id = src.def_id;
         let id = tcx.hir.as_local_node_id(def_id).unwrap();
         debug!("run_pass: {:?}", def_id);
+
+        // When NLL is enabled, the borrow checker runs the typeck
+        // itself, so we don't need this MIR pass anymore.
+        if tcx.nll() {
+            return;
+        }
 
         if tcx.sess.err_count() > 0 {
             // compiling a broken program can obviously result in a

@@ -211,10 +211,10 @@ pub trait SliceExt {
     #[stable(feature = "core", since = "1.6.0")]
     fn ends_with(&self, needle: &[Self::Item]) -> bool where Self::Item: PartialEq;
 
-    #[unstable(feature = "slice_rotate", issue = "41891")]
+    #[stable(feature = "slice_rotate", since = "1.26.0")]
     fn rotate_left(&mut self, mid: usize);
 
-    #[unstable(feature = "slice_rotate", issue = "41891")]
+    #[stable(feature = "slice_rotate", since = "1.26.0")]
     fn rotate_right(&mut self, k: usize);
 
     #[stable(feature = "clone_from_slice", since = "1.7.0")]
@@ -1246,18 +1246,15 @@ macro_rules! iterator {
             {
                 // The addition might panic on overflow
                 // Use the len of the slice to hint optimizer to remove result index bounds check.
-                let _n = make_slice!(self.ptr, self.end).len();
+                let n = make_slice!(self.ptr, self.end).len();
                 self.try_fold(0, move |i, x| {
                     if predicate(x) { Err(i) }
                     else { Ok(i + 1) }
                 }).err()
-                    // // FIXME(#48116/#45964):
-                    // // This assume() causes misoptimization on LLVM 6.
-                    // // Commented out until it is fixed again.
-                    // .map(|i| {
-                    //     unsafe { assume(i < n) };
-                    //     i
-                    // })
+                    .map(|i| {
+                        unsafe { assume(i < n) };
+                        i
+                    })
             }
 
             #[inline]
@@ -1274,13 +1271,10 @@ macro_rules! iterator {
                     if predicate(x) { Err(i) }
                     else { Ok(i) }
                 }).err()
-                    // // FIXME(#48116/#45964):
-                    // // This assume() causes misoptimization on LLVM 6.
-                    // // Commented out until it is fixed again.
-                    // .map(|i| {
-                    //     unsafe { assume(i < n) };
-                    //     i
-                    // })
+                    .map(|i| {
+                        unsafe { assume(i < n) };
+                        i
+                    })
             }
         }
 

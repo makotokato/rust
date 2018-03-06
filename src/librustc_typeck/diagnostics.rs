@@ -4368,12 +4368,13 @@ i_am_a_function();
 "##,
 
 E0619: r##"
+#### Note: this error code is no longer emitted by the compiler.
 The type-checker needed to know the type of an expression, but that type had not
 yet been inferred.
 
 Erroneous code example:
 
-```compile_fail,E0619
+```compile_fail
 let mut x = vec![];
 match x.pop() {
     Some(v) => {
@@ -4801,7 +4802,7 @@ register_diagnostics! {
 //  E0240,
 //  E0241,
 //  E0242,
-    E0245, // not a trait
+//  E0245, // not a trait
 //  E0246, // invalid recursive type
 //  E0247,
 //  E0248, // value used as a type, now reported earlier during resolution as E0412

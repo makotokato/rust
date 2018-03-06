@@ -58,7 +58,6 @@ mod arm_base;
 mod bitrig_base;
 mod cloudabi_base;
 mod dragonfly_base;
-mod emscripten_base;
 mod freebsd_base;
 mod haiku_base;
 mod linux_base;
@@ -143,9 +142,11 @@ supported_targets! {
     ("mips64el-unknown-linux-gnuabi64", mips64el_unknown_linux_gnuabi64),
     ("mipsel-unknown-linux-gnu", mipsel_unknown_linux_gnu),
     ("powerpc-unknown-linux-gnu", powerpc_unknown_linux_gnu),
+    ("powerpc-unknown-linux-gnuspe", powerpc_unknown_linux_gnuspe),
     ("powerpc64-unknown-linux-gnu", powerpc64_unknown_linux_gnu),
     ("powerpc64le-unknown-linux-gnu", powerpc64le_unknown_linux_gnu),
     ("s390x-unknown-linux-gnu", s390x_unknown_linux_gnu),
+    ("sparc-unknown-linux-gnu", sparc_unknown_linux_gnu),
     ("sparc64-unknown-linux-gnu", sparc64_unknown_linux_gnu),
     ("arm-unknown-linux-gnueabi", arm_unknown_linux_gnueabi),
     ("arm-unknown-linux-gnueabihf", arm_unknown_linux_gnueabihf),
@@ -186,6 +187,7 @@ supported_targets! {
     ("x86_64-unknown-openbsd", x86_64_unknown_openbsd),
 
     ("i686-unknown-netbsd", i686_unknown_netbsd),
+    ("powerpc-unknown-netbsd", powerpc_unknown_netbsd),
     ("sparc64-unknown-netbsd", sparc64_unknown_netbsd),
     ("x86_64-unknown-netbsd", x86_64_unknown_netbsd),
     ("x86_64-rumprun-netbsd", x86_64_rumprun_netbsd),
@@ -277,8 +279,8 @@ pub struct TargetOptions {
     /// Whether the target is built-in or loaded from a custom target specification.
     pub is_builtin: bool,
 
-    /// Linker to invoke. Defaults to "cc".
-    pub linker: String,
+    /// Linker to invoke
+    pub linker: Option<String>,
 
     /// Linker arguments that are unconditionally passed *before* any
     /// user-defined libraries.
@@ -344,9 +346,8 @@ pub struct TargetOptions {
     pub staticlib_suffix: String,
     /// OS family to use for conditional compilation. Valid options: "unix", "windows".
     pub target_family: Option<String>,
-    /// Whether the target toolchain is like OpenBSD's.
-    /// Only useful for compiling against OpenBSD, for configuring abi when returning a struct.
-    pub is_like_openbsd: bool,
+    /// Whether the target toolchain's ABI supports returning small structs as an integer.
+    pub abi_return_struct_as_int: bool,
     /// Whether the target toolchain is like macOS's. Only useful for compiling against iOS/macOS,
     /// in particular running dsymutil and some other stuff like `-dead_strip`. Defaults to false.
     pub is_like_osx: bool,
@@ -481,7 +482,7 @@ impl Default for TargetOptions {
     fn default() -> TargetOptions {
         TargetOptions {
             is_builtin: false,
-            linker: option_env!("CFG_DEFAULT_LINKER").unwrap_or("cc").to_string(),
+            linker: option_env!("CFG_DEFAULT_LINKER").map(|s| s.to_string()),
             pre_link_args: LinkArgs::new(),
             post_link_args: LinkArgs::new(),
             asm_args: Vec::new(),
@@ -502,7 +503,7 @@ impl Default for TargetOptions {
             staticlib_prefix: "lib".to_string(),
             staticlib_suffix: ".a".to_string(),
             target_family: None,
-            is_like_openbsd: false,
+            abi_return_struct_as_int: false,
             is_like_osx: false,
             is_like_solaris: false,
             is_like_windows: false,
@@ -731,7 +732,7 @@ impl Target {
         }
 
         key!(is_builtin, bool);
-        key!(linker);
+        key!(linker, optional);
         key!(pre_link_args, link_args);
         key!(pre_link_objects_exe, list);
         key!(pre_link_objects_dll, list);
@@ -757,7 +758,7 @@ impl Target {
         key!(staticlib_prefix);
         key!(staticlib_suffix);
         key!(target_family, optional);
-        key!(is_like_openbsd, bool);
+        key!(abi_return_struct_as_int, bool);
         key!(is_like_osx, bool);
         key!(is_like_solaris, bool);
         key!(is_like_windows, bool);
@@ -955,7 +956,7 @@ impl ToJson for Target {
         target_option_val!(staticlib_prefix);
         target_option_val!(staticlib_suffix);
         target_option_val!(target_family);
-        target_option_val!(is_like_openbsd);
+        target_option_val!(abi_return_struct_as_int);
         target_option_val!(is_like_osx);
         target_option_val!(is_like_solaris);
         target_option_val!(is_like_windows);

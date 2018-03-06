@@ -177,6 +177,7 @@ impl<'f, 'gcx, 'tcx> Coerce<'f, 'gcx, 'tcx> {
                 // micro-optimization: no need for this if `b` is
                 // already resolved in some way.
                 let diverging_ty = self.next_diverging_ty_var(
+                    ty::UniverseIndex::ROOT,
                     TypeVariableOrigin::AdjustmentType(self.cause.span));
                 self.unify_and(&b, &diverging_ty, simple(Adjust::NeverToAny))
             } else {
@@ -510,7 +511,7 @@ impl<'f, 'gcx, 'tcx> Coerce<'f, 'gcx, 'tcx> {
         // We only have the latter, so we use an inference variable
         // for the former and let type inference do the rest.
         let origin = TypeVariableOrigin::MiscVariable(self.cause.span);
-        let coerce_target = self.next_ty_var(origin);
+        let coerce_target = self.next_ty_var(ty::UniverseIndex::ROOT, origin);
         let mut coercion = self.unify_and(coerce_target, target, |target| {
             let unsize = Adjustment {
                 kind: Adjust::Unsize,
@@ -585,7 +586,7 @@ impl<'f, 'gcx, 'tcx> Coerce<'f, 'gcx, 'tcx> {
             }
         }
 
-        if has_unsized_tuple_coercion && !self.tcx.sess.features.borrow().unsized_tuple_coercion {
+        if has_unsized_tuple_coercion && !self.tcx.features().unsized_tuple_coercion {
             feature_gate::emit_feature_err(&self.tcx.sess.parse_sess,
                                            "unsized_tuple_coercion",
                                            self.cause.span,

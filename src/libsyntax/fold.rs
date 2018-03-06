@@ -29,7 +29,7 @@ use tokenstream::*;
 use util::small_vector::SmallVector;
 use util::move_map::MoveMap;
 
-use std::rc::Rc;
+use rustc_data_structures::sync::Lrc;
 
 pub trait Folder : Sized {
     // Any additions to this trait should happen in form
@@ -580,7 +580,7 @@ pub fn noop_fold_token<T: Folder>(t: token::Token, fld: &mut T) -> token::Token 
         token::Ident(id) => token::Ident(fld.fold_ident(id)),
         token::Lifetime(id) => token::Lifetime(fld.fold_ident(id)),
         token::Interpolated(nt) => {
-            let nt = match Rc::try_unwrap(nt) {
+            let nt = match Lrc::try_unwrap(nt) {
                 Ok(nt) => nt,
                 Err(nt) => (*nt).clone(),
             };
@@ -1018,7 +1018,7 @@ pub fn noop_fold_crate<T: Folder>(Crate {module, attrs, span}: Crate,
         ident: keywords::Invalid.ident(),
         attrs,
         id: ast::DUMMY_NODE_ID,
-        vis: ast::Visibility::Public,
+        vis: respan(span.empty(), ast::VisibilityKind::Public),
         span,
         node: ast::ItemKind::Mod(module),
         tokens: None,
@@ -1148,6 +1148,7 @@ pub fn noop_fold_pat<T: Folder>(p: P<Pat>, folder: &mut T) -> P<Pat> {
                        slice.map(|x| folder.fold_pat(x)),
                        after.move_map(|x| folder.fold_pat(x)))
             }
+            PatKind::Paren(inner) => PatKind::Paren(folder.fold_pat(inner)),
             PatKind::Mac(mac) => PatKind::Mac(folder.fold_mac(mac))
         },
         span: folder.new_span(span)
@@ -1210,8 +1211,8 @@ pub fn noop_fold_expr<T: Folder>(Expr {id, node, span, attrs}: Expr, folder: &mu
                        folder.fold_block(tr),
                        fl.map(|x| folder.fold_expr(x)))
             }
-            ExprKind::IfLet(pat, expr, tr, fl) => {
-                ExprKind::IfLet(folder.fold_pat(pat),
+            ExprKind::IfLet(pats, expr, tr, fl) => {
+                ExprKind::IfLet(pats.move_map(|pat| folder.fold_pat(pat)),
                           folder.fold_expr(expr),
                           folder.fold_block(tr),
                           fl.map(|x| folder.fold_expr(x)))
@@ -1221,8 +1222,8 @@ pub fn noop_fold_expr<T: Folder>(Expr {id, node, span, attrs}: Expr, folder: &mu
                           folder.fold_block(body),
                           opt_label.map(|label| folder.fold_label(label)))
             }
-            ExprKind::WhileLet(pat, expr, body, opt_label) => {
-                ExprKind::WhileLet(folder.fold_pat(pat),
+            ExprKind::WhileLet(pats, expr, body, opt_label) => {
+                ExprKind::WhileLet(pats.move_map(|pat| folder.fold_pat(pat)),
                              folder.fold_expr(expr),
                              folder.fold_block(body),
                              opt_label.map(|label| folder.fold_label(label)))
@@ -1367,11 +1368,13 @@ pub fn noop_fold_stmt_kind<T: Folder>(node: StmtKind, folder: &mut T) -> SmallVe
 }
 
 pub fn noop_fold_vis<T: Folder>(vis: Visibility, folder: &mut T) -> Visibility {
-    match vis {
-        Visibility::Restricted { path, id } => Visibility::Restricted {
-            path: path.map(|path| folder.fold_path(path)),
-            id: folder.new_id(id)
-        },
+    match vis.node {
+        VisibilityKind::Restricted { path, id } => {
+            respan(vis.span, VisibilityKind::Restricted {
+                path: path.map(|path| folder.fold_path(path)),
+                id: folder.new_id(id),
+            })
+        }
         _ => vis,
     }
 }

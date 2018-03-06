@@ -14,7 +14,7 @@ use hir::def_id::DefId;
 use rustc::infer::{self, InferOk};
 use rustc::infer::outlives::env::OutlivesEnvironment;
 use rustc::middle::region;
-use rustc::ty::subst::{Subst, Substs};
+use rustc::ty::subst::{Subst, Substs, UnpackedKind};
 use rustc::ty::{self, Ty, TyCtxt};
 use rustc::traits::{self, Reveal, ObligationCause};
 use util::common::ErrorReported;
@@ -90,7 +90,7 @@ fn ensure_drop_params_and_item_params_correspond<'a, 'tcx>(
 
         let drop_impl_span = tcx.def_span(drop_impl_did);
         let fresh_impl_substs =
-            infcx.fresh_substs_for_item(drop_impl_span, drop_impl_did);
+            infcx.fresh_substs_for_item(ty::UniverseIndex::ROOT, drop_impl_span, drop_impl_did);
         let fresh_impl_self_ty = drop_impl_ty.subst(tcx, fresh_impl_substs);
 
         let cause = &ObligationCause::misc(drop_impl_span, drop_impl_node_id);
@@ -331,10 +331,9 @@ pub fn check_safety_of_destructor_if_necessary<'a, 'gcx, 'tcx>(
         }
 
         for outlive in outlives {
-            if let Some(r) = outlive.as_region() {
-                rcx.sub_regions(origin(), parent_scope, r);
-            } else if let Some(ty) = outlive.as_type() {
-                rcx.type_must_outlive(origin(), ty, parent_scope);
+            match outlive.unpack() {
+                UnpackedKind::Lifetime(lt) => rcx.sub_regions(origin(), parent_scope, lt),
+                UnpackedKind::Type(ty) => rcx.type_must_outlive(origin(), ty, parent_scope),
             }
         }
     }

@@ -49,7 +49,6 @@ extern crate rustc_mir;
 extern crate rustc_allocator;
 extern crate rustc_apfloat;
 extern crate rustc_back;
-extern crate rustc_binaryen;
 extern crate rustc_const_math;
 extern crate rustc_data_structures;
 extern crate rustc_demangle;
@@ -63,7 +62,6 @@ extern crate rustc_trans_utils;
 extern crate syntax_pos;
 extern crate rustc_errors as errors;
 extern crate serialize;
-#[cfg(windows)]
 extern crate cc; // Used to locate MSVC
 extern crate tempdir;
 
@@ -73,8 +71,8 @@ pub use llvm_util::target_features;
 
 use std::any::Any;
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::mpsc;
+use rustc_data_structures::sync::Lrc;
 
 use rustc::dep_graph::DepGraph;
 use rustc::hir::def_id::CrateNum;
@@ -194,7 +192,6 @@ impl TransCrate for LlvmTransCrate {
         llvm_util::print_version();
     }
 
-    #[cfg(not(stage0))]
     fn diagnostics(&self) -> &[(&'static str, &'static str)] {
         &DIAGNOSTICS
     }
@@ -395,14 +392,13 @@ struct CrateInfo {
     profiler_runtime: Option<CrateNum>,
     sanitizer_runtime: Option<CrateNum>,
     is_no_builtins: FxHashSet<CrateNum>,
-    native_libraries: FxHashMap<CrateNum, Rc<Vec<NativeLibrary>>>,
+    native_libraries: FxHashMap<CrateNum, Lrc<Vec<NativeLibrary>>>,
     crate_name: FxHashMap<CrateNum, String>,
-    used_libraries: Rc<Vec<NativeLibrary>>,
-    link_args: Rc<Vec<String>>,
-    used_crate_source: FxHashMap<CrateNum, Rc<CrateSource>>,
+    used_libraries: Lrc<Vec<NativeLibrary>>,
+    link_args: Lrc<Vec<String>>,
+    used_crate_source: FxHashMap<CrateNum, Lrc<CrateSource>>,
     used_crates_static: Vec<(CrateNum, LibSource)>,
     used_crates_dynamic: Vec<(CrateNum, LibSource)>,
 }
 
-#[cfg(not(stage0))] // remove after the next snapshot
 __build_diagnostic_array! { librustc_trans, DIAGNOSTICS }

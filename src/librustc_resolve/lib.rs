@@ -59,6 +59,7 @@ use syntax::ast::{Label, Local, Mutability, Pat, PatKind, Path};
 use syntax::ast::{QSelf, TraitItemKind, TraitRef, Ty, TyKind};
 use syntax::feature_gate::{feature_err, emit_feature_err, GateIssue};
 use syntax::parse::token;
+use syntax::ptr::P;
 
 use syntax_pos::{Span, DUMMY_SP, MultiSpan};
 use errors::{DiagnosticBuilder, DiagnosticId};
@@ -69,7 +70,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::iter;
 use std::mem::replace;
-use std::rc::Rc;
+use rustc_data_structures::sync::Lrc;
 
 use resolve_imports::{ImportDirective, ImportDirectiveSubclass, NameResolution, ImportResolver};
 use macros::{InvocationData, LegacyBinding, LegacyScope, MacroBinding};
@@ -1117,7 +1118,7 @@ impl<'a> NameBinding<'a> {
         }
     }
 
-    fn get_macro(&self, resolver: &mut Resolver<'a>) -> Rc<SyntaxExtension> {
+    fn get_macro(&self, resolver: &mut Resolver<'a>) -> Lrc<SyntaxExtension> {
         resolver.get_macro(self.def_ignoring_ambiguity())
     }
 
@@ -1323,7 +1324,7 @@ pub struct Resolver<'a> {
     global_macros: FxHashMap<Name, &'a NameBinding<'a>>,
     pub all_macros: FxHashMap<Name, Def>,
     lexical_macro_resolutions: Vec<(Ident, &'a Cell<LegacyScope<'a>>)>,
-    macro_map: FxHashMap<DefId, Rc<SyntaxExtension>>,
+    macro_map: FxHashMap<DefId, Lrc<SyntaxExtension>>,
     macro_defs: FxHashMap<Mark, DefId>,
     local_macro_def_scopes: FxHashMap<NodeId, Module<'a>>,
     macro_exports: Vec<Export>,
@@ -1523,7 +1524,7 @@ impl<'a> Resolver<'a> {
         invocations.insert(Mark::root(),
                            arenas.alloc_invocation_data(InvocationData::root(graph_root)));
 
-        let features = session.features.borrow();
+        let features = session.features_untracked();
 
         let mut macro_defs = FxHashMap();
         macro_defs.insert(Mark::root(), root_def_id);
@@ -2162,6 +2163,7 @@ impl<'a> Resolver<'a> {
         result
     }
 
+    /// This is called to resolve a trait reference from an `impl` (i.e. `impl Trait for Foo`)
     fn with_optional_trait_ref<T, F>(&mut self, opt_trait_ref: Option<&TraitRef>, f: F) -> T
         where F: FnOnce(&mut Resolver, Option<DefId>) -> T
     {
@@ -2171,13 +2173,14 @@ impl<'a> Resolver<'a> {
             let path: Vec<_> = trait_ref.path.segments.iter()
                 .map(|seg| respan(seg.span, seg.identifier))
                 .collect();
-            let def = self.smart_resolve_path_fragment(trait_ref.ref_id,
-                                                       None,
-                                                       &path,
-                                                       trait_ref.path.span,
-                                                       trait_ref.path.segments.last().unwrap().span,
-                                                       PathSource::Trait(AliasPossibility::No))
-                .base_def();
+            let def = self.smart_resolve_path_fragment(
+                trait_ref.ref_id,
+                None,
+                &path,
+                trait_ref.path.span,
+                trait_ref.path.segments.last().unwrap().span,
+                PathSource::Trait(AliasPossibility::No)
+            ).base_def();
             if def != Def::Err {
                 new_id = Some(def.def_id());
                 let span = trait_ref.path.span;
@@ -2329,17 +2332,17 @@ impl<'a> Resolver<'a> {
 
     // check that all of the arms in an or-pattern have exactly the
     // same set of bindings, with the same binding modes for each.
-    fn check_consistent_bindings(&mut self, arm: &Arm) {
-        if arm.pats.is_empty() {
+    fn check_consistent_bindings(&mut self, pats: &[P<Pat>]) {
+        if pats.is_empty() {
             return;
         }
 
         let mut missing_vars = FxHashMap();
         let mut inconsistent_vars = FxHashMap();
-        for (i, p) in arm.pats.iter().enumerate() {
+        for (i, p) in pats.iter().enumerate() {
             let map_i = self.binding_mode_map(&p);
 
-            for (j, q) in arm.pats.iter().enumerate() {
+            for (j, q) in pats.iter().enumerate() {
                 if i == j {
                     continue;
                 }
@@ -2404,9 +2407,8 @@ impl<'a> Resolver<'a> {
             self.resolve_pattern(&pattern, PatternSource::Match, &mut bindings_list);
         }
 
-        // This has to happen *after* we determine which
-        // pat_idents are variants
-        self.check_consistent_bindings(arm);
+        // This has to happen *after* we determine which pat_idents are variants
+        self.check_consistent_bindings(&arm.pats);
 
         walk_list!(self, visit_expr, &arm.guard);
         self.visit_expr(&arm.body);
@@ -2490,7 +2492,9 @@ impl<'a> Resolver<'a> {
                         &ident.node.name.as_str())
                 );
             }
-            Some(..) if pat_src == PatternSource::Match => {
+            Some(..) if pat_src == PatternSource::Match ||
+                        pat_src == PatternSource::IfLet ||
+                        pat_src == PatternSource::WhileLet => {
                 // `Variant1(a) | Variant2(a)`, ok
                 // Reuse definition from the first `a`.
                 def = self.ribs[ValueNS].last_mut().unwrap().bindings[&ident.node];
@@ -2994,7 +2998,7 @@ impl<'a> Resolver<'a> {
                 let prim = self.primitive_type_table.primitive_types[&path[0].node.name];
                 match prim {
                     TyUint(UintTy::U128) | TyInt(IntTy::I128) => {
-                        if !self.session.features.borrow().i128_type {
+                        if !self.session.features_untracked().i128_type {
                             emit_feature_err(&self.session.parse_sess,
                                                 "i128_type", span, GateIssue::Language,
                                                 "128-bit type is unstable");
@@ -3085,7 +3089,7 @@ impl<'a> Resolver<'a> {
                     let prev_name = path[0].node.name;
                     if prev_name == keywords::Extern.name() ||
                        prev_name == keywords::CrateRoot.name() &&
-                       self.session.features.borrow().extern_absolute_paths {
+                       self.session.features_untracked().extern_absolute_paths {
                         // `::extern_crate::a::b`
                         let crate_id = self.crate_loader.resolve_crate_from_path(name, ident.span);
                         let crate_root =
@@ -3480,11 +3484,16 @@ impl<'a> Resolver<'a> {
                 visit::walk_expr(self, expr);
             }
 
-            ExprKind::IfLet(ref pattern, ref subexpression, ref if_block, ref optional_else) => {
+            ExprKind::IfLet(ref pats, ref subexpression, ref if_block, ref optional_else) => {
                 self.visit_expr(subexpression);
 
                 self.ribs[ValueNS].push(Rib::new(NormalRibKind));
-                self.resolve_pattern(pattern, PatternSource::IfLet, &mut FxHashMap());
+                let mut bindings_list = FxHashMap();
+                for pat in pats {
+                    self.resolve_pattern(pat, PatternSource::IfLet, &mut bindings_list);
+                }
+                // This has to happen *after* we determine which pat_idents are variants
+                self.check_consistent_bindings(pats);
                 self.visit_block(if_block);
                 self.ribs[ValueNS].pop();
 
@@ -3500,11 +3509,16 @@ impl<'a> Resolver<'a> {
                 });
             }
 
-            ExprKind::WhileLet(ref pattern, ref subexpression, ref block, label) => {
+            ExprKind::WhileLet(ref pats, ref subexpression, ref block, label) => {
                 self.with_resolved_label(label, expr.id, |this| {
                     this.visit_expr(subexpression);
                     this.ribs[ValueNS].push(Rib::new(NormalRibKind));
-                    this.resolve_pattern(pattern, PatternSource::WhileLet, &mut FxHashMap());
+                    let mut bindings_list = FxHashMap();
+                    for pat in pats {
+                        this.resolve_pattern(pat, PatternSource::WhileLet, &mut bindings_list);
+                    }
+                    // This has to happen *after* we determine which pat_idents are variants
+                    this.check_consistent_bindings(pats);
                     this.visit_block(block);
                     this.ribs[ValueNS].pop();
                 });
@@ -3796,13 +3810,15 @@ impl<'a> Resolver<'a> {
     }
 
     fn resolve_visibility(&mut self, vis: &ast::Visibility) -> ty::Visibility {
-        match *vis {
-            ast::Visibility::Public => ty::Visibility::Public,
-            ast::Visibility::Crate(..) => ty::Visibility::Restricted(DefId::local(CRATE_DEF_INDEX)),
-            ast::Visibility::Inherited => {
+        match vis.node {
+            ast::VisibilityKind::Public => ty::Visibility::Public,
+            ast::VisibilityKind::Crate(..) => {
+                ty::Visibility::Restricted(DefId::local(CRATE_DEF_INDEX))
+            }
+            ast::VisibilityKind::Inherited => {
                 ty::Visibility::Restricted(self.current_module.normal_ancestor_id)
             }
-            ast::Visibility::Restricted { ref path, id } => {
+            ast::VisibilityKind::Restricted { ref path, id, .. } => {
                 let def = self.smart_resolve_path(id, None, path,
                                                   PathSource::Visibility).base_def();
                 if def == Def::Err {
@@ -4183,5 +4199,4 @@ pub enum MakeGlobMap {
     No,
 }
 
-#[cfg(not(stage0))] // remove after the next snapshot
 __build_diagnostic_array! { librustc_resolve, DIAGNOSTICS }

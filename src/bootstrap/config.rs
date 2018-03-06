@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
 use std::io::prelude::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::cmp;
 
@@ -57,6 +57,7 @@ pub struct Config {
     pub profiler: bool,
     pub ignore_git: bool,
     pub exclude: Vec<PathBuf>,
+    pub rustc_error_format: Option<String>,
 
     pub run_host_only: bool,
 
@@ -80,6 +81,8 @@ pub struct Config {
     pub llvm_experimental_targets: String,
     pub llvm_link_jobs: Option<u32>,
 
+    pub lld_enabled: bool,
+
     // rust codegen options
     pub rust_optimize: bool,
     pub rust_codegen_units: Option<u32>,
@@ -95,6 +98,7 @@ pub struct Config {
     pub rust_debuginfo_tests: bool,
     pub rust_dist_src: bool,
     pub rust_codegen_backends: Vec<Interned<String>>,
+    pub rust_codegen_backends_dir: String,
 
     pub build: Interned<String>,
     pub hosts: Vec<Interned<String>>,
@@ -288,7 +292,9 @@ struct Rust {
     test_miri: Option<bool>,
     save_toolstates: Option<String>,
     codegen_backends: Option<Vec<String>>,
+    codegen_backends_dir: Option<String>,
     wasm_syscall: Option<bool>,
+    lld: Option<bool>,
 }
 
 /// TOML representation of how each build target is configured.
@@ -329,7 +335,9 @@ impl Config {
         config.rust_dist_src = true;
         config.test_miri = false;
         config.rust_codegen_backends = vec![INTERNER.intern_str("llvm")];
+        config.rust_codegen_backends_dir = "codegen-backends".to_owned();
 
+        config.rustc_error_format = flags.rustc_error_format;
         config.on_fail = flags.on_fail;
         config.stage = flags.stage;
         config.src = flags.src;
@@ -475,6 +483,7 @@ impl Config {
             set(&mut config.quiet_tests, rust.quiet_tests);
             set(&mut config.test_miri, rust.test_miri);
             set(&mut config.wasm_syscall, rust.wasm_syscall);
+            set(&mut config.lld_enabled, rust.lld);
             config.rustc_parallel_queries = rust.experimental_parallel_queries.unwrap_or(false);
             config.rustc_default_linker = rust.default_linker.clone();
             config.musl_root = rust.musl_root.clone().map(PathBuf::from);
@@ -485,6 +494,8 @@ impl Config {
                     .map(|s| INTERNER.intern_str(s))
                     .collect();
             }
+
+            set(&mut config.rust_codegen_backends_dir, rust.codegen_backends_dir.clone());
 
             match rust.codegen_units {
                 Some(0) => config.rust_codegen_units = Some(num_cpus::get() as u32),
@@ -562,6 +573,17 @@ impl Config {
         config.ignore_git = ignore_git.unwrap_or(default);
 
         config
+    }
+
+    /// Try to find the relative path of `libdir`.
+    pub fn libdir_relative(&self) -> Option<&Path> {
+        let libdir = self.libdir.as_ref()?;
+        if libdir.is_relative() {
+            Some(libdir)
+        } else {
+            // Try to make it relative to the prefix.
+            libdir.strip_prefix(self.prefix.as_ref()?).ok()
+        }
     }
 
     pub fn verbose(&self) -> bool {

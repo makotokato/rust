@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::rc::Rc;
+use rustc_data_structures::sync::Lrc;
 use std::sync::Arc;
 
 use base;
@@ -21,7 +21,6 @@ use rustc::ty::TyCtxt;
 use rustc::ty::maps::Providers;
 use rustc::util::nodemap::FxHashMap;
 use rustc_allocator::ALLOCATOR_METHODS;
-use rustc_back::LinkerFlavor;
 use syntax::attr;
 
 pub type ExportedSymbols = FxHashMap<
@@ -64,7 +63,7 @@ pub fn crates_export_threshold(crate_types: &[config::CrateType])
 pub fn provide(providers: &mut Providers) {
     providers.exported_symbol_ids = |tcx, cnum| {
         let export_threshold = threshold(tcx);
-        Rc::new(tcx.exported_symbols(cnum)
+        Lrc::new(tcx.exported_symbols(cnum)
             .iter()
             .filter_map(|&(_, id, level)| {
                 id.and_then(|id| {
@@ -156,26 +155,12 @@ pub fn provide_extern(providers: &mut Providers) {
         let special_runtime_crate =
             tcx.is_panic_runtime(cnum) || tcx.is_compiler_builtins(cnum);
 
-        // Dealing with compiler-builtins and wasm right now is super janky.
-        // There's no linker! As a result we need all of the compiler-builtins
-        // exported symbols to make their way through all the way to the end of
-        // compilation. We want to make sure that LLVM doesn't remove them as
-        // well because we may or may not need them in the final output
-        // artifact. For now just force them to always get exported at the C
-        // layer, and we'll worry about gc'ing them later.
-        let compiler_builtins_and_binaryen =
-            tcx.is_compiler_builtins(cnum) &&
-            tcx.sess.linker_flavor() == LinkerFlavor::Binaryen;
-
         let mut crate_exports: Vec<_> = tcx
             .exported_symbol_ids(cnum)
             .iter()
             .map(|&def_id| {
                 let name = tcx.symbol_name(Instance::mono(tcx, def_id));
-                let export_level = if compiler_builtins_and_binaryen &&
-                                      tcx.contains_extern_indicator(def_id) {
-                    SymbolExportLevel::C
-                } else if special_runtime_crate {
+                let export_level = if special_runtime_crate {
                     // We can probably do better here by just ensuring that
                     // it has hidden visibility rather than public
                     // visibility, as this is primarily here to ensure it's

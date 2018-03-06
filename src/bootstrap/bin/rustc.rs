@@ -61,6 +61,11 @@ fn main() {
         args.remove(n);
     }
 
+    if let Some(s) = env::var_os("RUSTC_ERROR_FORMAT") {
+        args.push("--error-format".into());
+        args.push(s);
+    }
+
     // Detect whether or not we're a build script depending on whether --target
     // is passed (a bit janky...)
     let target = args.windows(2)
@@ -219,7 +224,7 @@ fn main() {
                 // flesh out rpath support more fully in the future.
                 cmd.arg("-Z").arg("osx-rpath-install-name");
                 Some("-Wl,-rpath,@loader_path/../lib")
-            } else if !target.contains("windows") {
+            } else if !target.contains("windows") && !target.contains("wasm32") {
                 Some("-Wl,-rpath,$ORIGIN/../lib")
             } else {
                 None

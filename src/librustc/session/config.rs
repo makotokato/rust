@@ -41,7 +41,7 @@ use std::collections::btree_map::Iter as BTreeMapIter;
 use std::collections::btree_map::Keys as BTreeMapKeysIter;
 use std::collections::btree_map::Values as BTreeMapValuesIter;
 
-use std::fmt;
+use std::{fmt, str};
 use std::hash::Hasher;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
@@ -113,7 +113,7 @@ pub enum OutputType {
 }
 
 /// The epoch of the compiler (RFC 2052)
-#[derive(Clone, Copy, Hash, PartialOrd, Ord, Eq, PartialEq)]
+#[derive(Clone, Copy, Hash, PartialOrd, Ord, Eq, PartialEq, Debug)]
 #[non_exhaustive]
 pub enum Epoch {
     // epochs must be kept in order, newest to oldest
@@ -135,6 +135,37 @@ pub enum Epoch {
     // somewhere. That will need to be updated
     // whenever we're stabilizing/introducing a new epoch
     // as well as changing the default Cargo template.
+}
+
+pub const ALL_EPOCHS: &[Epoch] = &[Epoch::Epoch2015, Epoch::Epoch2018];
+
+impl ToString for Epoch {
+    fn to_string(&self) -> String {
+        match *self {
+            Epoch::Epoch2015 => "2015".into(),
+            Epoch::Epoch2018 => "2018".into(),
+        }
+    }
+}
+
+impl Epoch {
+    pub fn lint_name(&self) -> &'static str {
+        match *self {
+            Epoch::Epoch2015 => "epoch_2015",
+            Epoch::Epoch2018 => "epoch_2018",
+        }
+    }
+}
+
+impl str::FromStr for Epoch {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "2015" => Ok(Epoch::Epoch2015),
+            "2018" => Ok(Epoch::Epoch2018),
+            _ => Err(())
+        }
+    }
 }
 
 impl_stable_hash_for!(enum self::OutputType {
@@ -310,7 +341,7 @@ macro_rules! hash_option {
     ($opt_name:ident, $opt_expr:expr, $sub_hashes:expr, [UNTRACKED]) => ({});
     ($opt_name:ident, $opt_expr:expr, $sub_hashes:expr, [TRACKED]) => ({
         if $sub_hashes.insert(stringify!($opt_name),
-                              $opt_expr as &dep_tracking::DepTrackingHash).is_some() {
+                              $opt_expr as &dyn dep_tracking::DepTrackingHash).is_some() {
             bug!("Duplicate key in CLI DepTrackingHash: {}", stringify!($opt_name))
         }
     });
@@ -389,10 +420,7 @@ top_level_options!(
         lint_cap: Option<lint::Level> [TRACKED],
         describe_lints: bool [UNTRACKED],
         output_types: OutputTypes [TRACKED],
-        // FIXME(mw): We track this for now but it actually doesn't make too
-        //            much sense: The search path can stay the same while the
-        //            things discovered there might have changed on disk.
-        search_paths: SearchPaths [TRACKED],
+        search_paths: SearchPaths [UNTRACKED],
         libs: Vec<(String, Option<String>, Option<cstore::NativeLibraryKind>)> [TRACKED],
         maybe_sysroot: Option<PathBuf> [TRACKED],
 
@@ -411,10 +439,7 @@ top_level_options!(
         // version of `debugging_opts.borrowck`, which is just a plain string.
         borrowck_mode: BorrowckMode [UNTRACKED],
         cg: CodegenOptions [TRACKED],
-        // FIXME(mw): We track this for now but it actually doesn't make too
-        //            much sense: The value of this option can stay the same
-        //            while the files they refer to might have changed on disk.
-        externs: Externs [TRACKED],
+        externs: Externs [UNTRACKED],
         crate_name: Option<String> [TRACKED],
         // An optional name to use as the crate for std during std injection,
         // written `extern crate std = "name"`. Default to "std". Used by
@@ -435,6 +460,9 @@ top_level_options!(
         // if we otherwise use the defaults of rustc.
         cli_forced_codegen_units: Option<usize> [UNTRACKED],
         cli_forced_thinlto_off: bool [UNTRACKED],
+
+        // Remap source path prefixes in all output (messages, object files, debug, etc)
+        remap_path_prefix: Vec<(PathBuf, PathBuf)> [UNTRACKED],
     }
 );
 
@@ -617,6 +645,7 @@ pub fn basic_options() -> Options {
         actually_rustdoc: false,
         cli_forced_codegen_units: None,
         cli_forced_thinlto_off: false,
+        remap_path_prefix: Vec::new(),
     }
 }
 
@@ -635,11 +664,7 @@ impl Options {
     }
 
     pub fn file_path_mapping(&self) -> FilePathMapping {
-        FilePathMapping::new(
-            self.debugging_opts.remap_path_prefix_from.iter().zip(
-                self.debugging_opts.remap_path_prefix_to.iter()
-            ).map(|(src, dst)| (src.clone(), dst.clone())).collect()
-        )
+        FilePathMapping::new(self.remap_path_prefix.clone())
     }
 
     /// True if there will be an output file generated
@@ -1021,11 +1046,17 @@ macro_rules! options {
 
         fn parse_epoch(slot: &mut Epoch, v: Option<&str>) -> bool {
             match v {
-                Some("2015") => *slot = Epoch::Epoch2015,
-                Some("2018") => *slot = Epoch::Epoch2018,
-                _ => return false,
+                Some(s) => {
+                    let epoch = s.parse();
+                    if let Ok(parsed) = epoch {
+                        *slot = parsed;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
             }
-            true
         }
     }
 ) }
@@ -1269,10 +1300,6 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "set the optimization fuel quota for a crate"),
     print_fuel: Option<String> = (None, parse_opt_string, [TRACKED],
         "make Rustc print the total optimization fuel used by a crate"),
-    remap_path_prefix_from: Vec<PathBuf> = (vec![], parse_pathbuf_push, [UNTRACKED],
-        "add a source pattern to the file path remapping config"),
-    remap_path_prefix_to: Vec<PathBuf> = (vec![], parse_pathbuf_push, [UNTRACKED],
-        "add a mapping target to the file path remapping config"),
     force_unstable_if_unmarked: bool = (false, parse_bool, [TRACKED],
         "force all crates to be `rustc_private` unstable"),
     pre_link_arg: Vec<String> = (vec![], parse_string_push, [UNTRACKED],
@@ -1322,6 +1349,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
          epoch). Crates compiled with different epochs can be linked together."),
     run_dsymutil: Option<bool> = (None, parse_opt_bool, [TRACKED],
           "run `dsymutil` and delete intermediate object files"),
+    ui_testing: bool = (false, parse_bool, [UNTRACKED],
+          "format compiler diagnostics in a way that's better suitable for UI testing"),
 }
 
 pub fn default_lib_output() -> CrateType {
@@ -1421,7 +1450,7 @@ pub enum OptionStability {
 }
 
 pub struct RustcOptGroup {
-    pub apply: Box<Fn(&mut getopts::Options) -> &mut getopts::Options>,
+    pub apply: Box<dyn Fn(&mut getopts::Options) -> &mut getopts::Options>,
     pub name: &'static str,
     pub stability: OptionStability,
 }
@@ -1595,6 +1624,7 @@ pub fn rustc_optgroups() -> Vec<RustcOptGroup> {
                   `expanded` (crates expanded), or
                   `expanded,identified` (fully parenthesized, AST nodes with IDs).",
                  "TYPE"),
+        opt::multi_s("", "remap-path-prefix", "remap source names in output", "FROM=TO"),
     ]);
     opts
 }
@@ -1716,23 +1746,6 @@ pub fn build_session_options_and_crate_config(matches: &getopts::Matches)
     };
     if output_types.is_empty() {
         output_types.insert(OutputType::Exe, None);
-    }
-
-    let remap_path_prefix_sources = debugging_opts.remap_path_prefix_from.len();
-    let remap_path_prefix_targets = debugging_opts.remap_path_prefix_to.len();
-
-    if remap_path_prefix_targets < remap_path_prefix_sources {
-        for source in &debugging_opts.remap_path_prefix_from[remap_path_prefix_targets..] {
-            early_error(error_format,
-                &format!("option `-Zremap-path-prefix-from='{}'` does not have \
-                         a corresponding `-Zremap-path-prefix-to`", source.display()))
-        }
-    } else if remap_path_prefix_targets > remap_path_prefix_sources {
-        for target in &debugging_opts.remap_path_prefix_to[remap_path_prefix_sources..] {
-            early_error(error_format,
-                &format!("option `-Zremap-path-prefix-to='{}'` does not have \
-                          a corresponding `-Zremap-path-prefix-from`", target.display()))
-        }
     }
 
     let mut cg = build_codegen_options(matches, error_format);
@@ -1968,6 +1981,20 @@ pub fn build_session_options_and_crate_config(matches: &getopts::Matches)
 
     let crate_name = matches.opt_str("crate-name");
 
+    let remap_path_prefix = matches.opt_strs("remap-path-prefix")
+        .into_iter()
+        .map(|remap| {
+            let mut parts = remap.rsplitn(2, '='); // reverse iterator
+            let to = parts.next();
+            let from = parts.next();
+            match (from, to) {
+                (Some(from), Some(to)) => (PathBuf::from(from), PathBuf::from(to)),
+                _ => early_error(error_format,
+                        "--remap-path-prefix must contain '=' between FROM and TO"),
+            }
+        })
+        .collect();
+
     (Options {
         crate_types,
         optimize: opt_level,
@@ -1995,6 +2022,7 @@ pub fn build_session_options_and_crate_config(matches: &getopts::Matches)
         actually_rustdoc: false,
         cli_forced_codegen_units: codegen_units,
         cli_forced_thinlto_off: disable_thinlto,
+        remap_path_prefix,
     },
     cfg)
 }
@@ -2107,13 +2135,12 @@ impl fmt::Display for CrateType {
 mod dep_tracking {
     use lint;
     use middle::cstore;
-    use session::search_paths::{PathKind, SearchPaths};
     use std::collections::BTreeMap;
     use std::hash::Hash;
     use std::path::PathBuf;
     use std::collections::hash_map::DefaultHasher;
     use super::{Passes, CrateType, OptLevel, DebugInfoLevel, Lto,
-                OutputTypes, Externs, ErrorOutputType, Sanitizer, Epoch};
+                OutputTypes, ErrorOutputType, Sanitizer, Epoch};
     use syntax::feature_gate::UnstableFeatures;
     use rustc_back::{PanicStrategy, RelroLevel};
 
@@ -2170,7 +2197,6 @@ mod dep_tracking {
     impl_dep_tracking_hash_via_hash!(Lto);
     impl_dep_tracking_hash_via_hash!(DebugInfoLevel);
     impl_dep_tracking_hash_via_hash!(UnstableFeatures);
-    impl_dep_tracking_hash_via_hash!(Externs);
     impl_dep_tracking_hash_via_hash!(OutputTypes);
     impl_dep_tracking_hash_via_hash!(cstore::NativeLibraryKind);
     impl_dep_tracking_hash_via_hash!(Sanitizer);
@@ -2184,15 +2210,6 @@ mod dep_tracking {
     impl_dep_tracking_hash_for_sortable_vec_of!((String, Option<String>,
                                                  Option<cstore::NativeLibraryKind>));
     impl_dep_tracking_hash_for_sortable_vec_of!((String, u64));
-    impl DepTrackingHash for SearchPaths {
-        fn hash(&self, hasher: &mut DefaultHasher, _: ErrorOutputType) {
-            let mut elems: Vec<_> = self
-                .iter(PathKind::All)
-                .collect();
-            elems.sort();
-            Hash::hash(&elems, hasher);
-        }
-    }
 
     impl<T1, T2> DepTrackingHash for (T1, T2)
         where T1: DepTrackingHash,
@@ -2222,7 +2239,7 @@ mod dep_tracking {
     }
 
     // This is a stable hash because BTreeMap is a sorted container
-    pub fn stable_hash(sub_hashes: BTreeMap<&'static str, &DepTrackingHash>,
+    pub fn stable_hash(sub_hashes: BTreeMap<&'static str, &dyn DepTrackingHash>,
                        hasher: &mut DefaultHasher,
                        error_format: ErrorOutputType) {
         for (key, sub_hash) in sub_hashes {
@@ -2380,43 +2397,6 @@ mod tests {
     }
 
     #[test]
-    fn test_externs_tracking_hash_different_values() {
-        let mut v1 = super::basic_options();
-        let mut v2 = super::basic_options();
-        let mut v3 = super::basic_options();
-
-        v1.externs = Externs::new(mk_map(vec![
-            (String::from("a"), mk_set(vec![String::from("b"),
-                                            String::from("c")])),
-            (String::from("d"), mk_set(vec![String::from("e"),
-                                            String::from("f")])),
-        ]));
-
-        v2.externs = Externs::new(mk_map(vec![
-            (String::from("a"), mk_set(vec![String::from("b"),
-                                            String::from("c")])),
-            (String::from("X"), mk_set(vec![String::from("e"),
-                                            String::from("f")])),
-        ]));
-
-        v3.externs = Externs::new(mk_map(vec![
-            (String::from("a"), mk_set(vec![String::from("b"),
-                                            String::from("c")])),
-            (String::from("d"), mk_set(vec![String::from("X"),
-                                            String::from("f")])),
-        ]));
-
-        assert!(v1.dep_tracking_hash() != v2.dep_tracking_hash());
-        assert!(v1.dep_tracking_hash() != v3.dep_tracking_hash());
-        assert!(v2.dep_tracking_hash() != v3.dep_tracking_hash());
-
-        // Check clone
-        assert_eq!(v1.dep_tracking_hash(), v1.clone().dep_tracking_hash());
-        assert_eq!(v2.dep_tracking_hash(), v2.clone().dep_tracking_hash());
-        assert_eq!(v3.dep_tracking_hash(), v3.clone().dep_tracking_hash());
-    }
-
-    #[test]
     fn test_externs_tracking_hash_different_construction_order() {
         let mut v1 = super::basic_options();
         let mut v2 = super::basic_options();
@@ -2504,69 +2484,6 @@ mod tests {
         // Check clone
         assert_eq!(v1.dep_tracking_hash(), v1.clone().dep_tracking_hash());
         assert_eq!(v2.dep_tracking_hash(), v2.clone().dep_tracking_hash());
-    }
-
-    #[test]
-    fn test_search_paths_tracking_hash_different_values() {
-        let mut v1 = super::basic_options();
-        let mut v2 = super::basic_options();
-        let mut v3 = super::basic_options();
-        let mut v4 = super::basic_options();
-        let mut v5 = super::basic_options();
-
-        // Reference
-        v1.search_paths.add_path("native=abc", super::ErrorOutputType::Json(false));
-        v1.search_paths.add_path("crate=def", super::ErrorOutputType::Json(false));
-        v1.search_paths.add_path("dependency=ghi", super::ErrorOutputType::Json(false));
-        v1.search_paths.add_path("framework=jkl", super::ErrorOutputType::Json(false));
-        v1.search_paths.add_path("all=mno", super::ErrorOutputType::Json(false));
-
-        // Native changed
-        v2.search_paths.add_path("native=XXX", super::ErrorOutputType::Json(false));
-        v2.search_paths.add_path("crate=def", super::ErrorOutputType::Json(false));
-        v2.search_paths.add_path("dependency=ghi", super::ErrorOutputType::Json(false));
-        v2.search_paths.add_path("framework=jkl", super::ErrorOutputType::Json(false));
-        v2.search_paths.add_path("all=mno", super::ErrorOutputType::Json(false));
-
-        // Crate changed
-        v2.search_paths.add_path("native=abc", super::ErrorOutputType::Json(false));
-        v2.search_paths.add_path("crate=XXX", super::ErrorOutputType::Json(false));
-        v2.search_paths.add_path("dependency=ghi", super::ErrorOutputType::Json(false));
-        v2.search_paths.add_path("framework=jkl", super::ErrorOutputType::Json(false));
-        v2.search_paths.add_path("all=mno", super::ErrorOutputType::Json(false));
-
-        // Dependency changed
-        v3.search_paths.add_path("native=abc", super::ErrorOutputType::Json(false));
-        v3.search_paths.add_path("crate=def", super::ErrorOutputType::Json(false));
-        v3.search_paths.add_path("dependency=XXX", super::ErrorOutputType::Json(false));
-        v3.search_paths.add_path("framework=jkl", super::ErrorOutputType::Json(false));
-        v3.search_paths.add_path("all=mno", super::ErrorOutputType::Json(false));
-
-        // Framework changed
-        v4.search_paths.add_path("native=abc", super::ErrorOutputType::Json(false));
-        v4.search_paths.add_path("crate=def", super::ErrorOutputType::Json(false));
-        v4.search_paths.add_path("dependency=ghi", super::ErrorOutputType::Json(false));
-        v4.search_paths.add_path("framework=XXX", super::ErrorOutputType::Json(false));
-        v4.search_paths.add_path("all=mno", super::ErrorOutputType::Json(false));
-
-        // All changed
-        v5.search_paths.add_path("native=abc", super::ErrorOutputType::Json(false));
-        v5.search_paths.add_path("crate=def", super::ErrorOutputType::Json(false));
-        v5.search_paths.add_path("dependency=ghi", super::ErrorOutputType::Json(false));
-        v5.search_paths.add_path("framework=jkl", super::ErrorOutputType::Json(false));
-        v5.search_paths.add_path("all=XXX", super::ErrorOutputType::Json(false));
-
-        assert!(v1.dep_tracking_hash() != v2.dep_tracking_hash());
-        assert!(v1.dep_tracking_hash() != v3.dep_tracking_hash());
-        assert!(v1.dep_tracking_hash() != v4.dep_tracking_hash());
-        assert!(v1.dep_tracking_hash() != v5.dep_tracking_hash());
-
-        // Check clone
-        assert_eq!(v1.dep_tracking_hash(), v1.clone().dep_tracking_hash());
-        assert_eq!(v2.dep_tracking_hash(), v2.clone().dep_tracking_hash());
-        assert_eq!(v3.dep_tracking_hash(), v3.clone().dep_tracking_hash());
-        assert_eq!(v4.dep_tracking_hash(), v4.clone().dep_tracking_hash());
-        assert_eq!(v5.dep_tracking_hash(), v5.clone().dep_tracking_hash());
     }
 
     #[test]

@@ -15,8 +15,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::panic::{self, AssertUnwindSafe};
 use std::process::Command;
-use std::rc::Rc;
 use std::str;
+use rustc_data_structures::sync::Lrc;
 use std::sync::{Arc, Mutex};
 
 use testing;
@@ -72,7 +72,7 @@ pub fn run(input_path: &Path,
         ..config::basic_options().clone()
     };
 
-    let codemap = Rc::new(CodeMap::new(sessopts.file_path_mapping()));
+    let codemap = Lrc::new(CodeMap::new(sessopts.file_path_mapping()));
     let handler =
         errors::Handler::with_tty_emitter(ColorConfig::Auto,
                                           true, false,
@@ -82,7 +82,7 @@ pub fn run(input_path: &Path,
         sessopts, Some(input_path.to_owned()), handler, codemap.clone(),
     );
     let trans = rustc_driver::get_trans(&sess);
-    let cstore = Rc::new(CStore::new(trans.metadata_loader()));
+    let cstore = CStore::new(trans.metadata_loader());
     rustc_lint::register_builtins(&mut sess.lint_store.borrow_mut(), Some(&sess));
     sess.parse_sess.config =
         config::build_configuration(&sess, config::parse_cfgspecs(cfgs.clone()));
@@ -119,7 +119,7 @@ pub fn run(input_path: &Path,
                                        linker);
 
     {
-        let map = hir::map::map_crate(&sess, &*cstore, &mut hir_forest, &defs);
+        let map = hir::map::map_crate(&sess, &cstore, &mut hir_forest, &defs);
         let krate = map.krate();
         let mut hir_collector = HirCollector {
             sess: &sess,
@@ -230,7 +230,7 @@ fn run_test(test: &str, cratename: &str, filename: &FileName, line: usize,
         }
     }
     let data = Arc::new(Mutex::new(Vec::new()));
-    let codemap = Rc::new(CodeMap::new_doctest(
+    let codemap = Lrc::new(CodeMap::new_doctest(
         sessopts.file_path_mapping(), filename.clone(), line as isize - line_offset as isize
     ));
     let emitter = errors::emitter::EmitterWriter::new(box Sink(data.clone()),
@@ -247,7 +247,7 @@ fn run_test(test: &str, cratename: &str, filename: &FileName, line: usize,
         sessopts, None, diagnostic_handler, codemap,
     );
     let trans = rustc_driver::get_trans(&sess);
-    let cstore = Rc::new(CStore::new(trans.metadata_loader()));
+    let cstore = CStore::new(trans.metadata_loader());
     rustc_lint::register_builtins(&mut sess.lint_store.borrow_mut(), Some(&sess));
 
     let outdir = Mutex::new(TempDir::new("rustdoctest").ok().expect("rustdoc needs a tempdir"));
@@ -414,7 +414,8 @@ fn partition_source(s: &str) -> (String, String) {
     for line in s.lines() {
         let trimline = line.trim();
         let header = trimline.is_whitespace() ||
-            trimline.starts_with("#![");
+            trimline.starts_with("#![") ||
+            trimline.starts_with("extern crate");
         if !header || after_header {
             after_header = true;
             after.push_str(line);
@@ -461,7 +462,7 @@ pub struct Collector {
     opts: TestOptions,
     maybe_sysroot: Option<PathBuf>,
     position: Span,
-    codemap: Option<Rc<CodeMap>>,
+    codemap: Option<Lrc<CodeMap>>,
     filename: Option<PathBuf>,
     linker: Option<PathBuf>,
 }
@@ -469,7 +470,7 @@ pub struct Collector {
 impl Collector {
     pub fn new(cratename: String, cfgs: Vec<String>, libs: SearchPaths, externs: Externs,
                use_headers: bool, opts: TestOptions, maybe_sysroot: Option<PathBuf>,
-               codemap: Option<Rc<CodeMap>>, filename: Option<PathBuf>,
+               codemap: Option<Lrc<CodeMap>>, filename: Option<PathBuf>,
                linker: Option<PathBuf>) -> Collector {
         Collector {
             tests: Vec::new(),
@@ -628,7 +629,7 @@ impl<'a, 'hir> HirCollector<'a, 'hir> {
                                             nested: F) {
         let mut attrs = Attributes::from_ast(self.sess.diagnostic(), attrs);
         if let Some(ref cfg) = attrs.cfg {
-            if !cfg.matches(&self.sess.parse_sess, Some(&self.sess.features.borrow())) {
+            if !cfg.matches(&self.sess.parse_sess, Some(&self.sess.features_untracked())) {
                 return;
             }
         }
@@ -814,8 +815,8 @@ use asdf::qwop;
 assert_eq!(2+2, 4);";
         let expected =
 "#![allow(unused)]
-fn main() {
 extern crate asdf;
+fn main() {
 use asdf::qwop;
 assert_eq!(2+2, 4);
 }".to_string();

@@ -46,7 +46,7 @@ use hir::HirVec;
 use hir::map::{Definitions, DefKey, DefPathData};
 use hir::def_id::{DefIndex, DefId, CRATE_DEF_INDEX, DefIndexAddressSpace};
 use hir::def::{Def, PathResolution};
-use lint::builtin::PARENTHESIZED_PARAMS_IN_TYPES_AND_MODULES;
+use lint::builtin::{self, PARENTHESIZED_PARAMS_IN_TYPES_AND_MODULES};
 use middle::cstore::CrateStore;
 use rustc_data_structures::indexed_vec::IndexVec;
 use session::Session;
@@ -80,13 +80,13 @@ pub struct LoweringContext<'a> {
     // Use to assign ids to hir nodes that do not directly correspond to an ast node
     sess: &'a Session,
 
-    cstore: &'a CrateStore,
+    cstore: &'a dyn CrateStore,
 
     // As we walk the AST we must keep track of the current 'parent' def id (in
     // the form of a DefIndex) so that if we create a new node which introduces
     // a definition, then we can properly create the def id.
     parent_def: Option<DefIndex>,
-    resolver: &'a mut Resolver,
+    resolver: &'a mut dyn Resolver,
     name_map: FxHashMap<Ident, Name>,
 
     /// The items being lowered are collected here.
@@ -177,10 +177,10 @@ enum ImplTraitContext {
 }
 
 pub fn lower_crate(sess: &Session,
-                   cstore: &CrateStore,
+                   cstore: &dyn CrateStore,
                    dep_graph: &DepGraph,
                    krate: &Crate,
-                   resolver: &mut Resolver)
+                   resolver: &mut dyn Resolver)
                    -> hir::Crate {
     // We're constructing the HIR here; we don't care what we will
     // read, since we haven't even constructed the *input* to
@@ -550,7 +550,7 @@ impl<'a> LoweringContext<'a> {
     {
         assert!(!self.is_collecting_in_band_lifetimes);
         assert!(self.lifetimes_to_define.is_empty());
-        self.is_collecting_in_band_lifetimes = self.sess.features.borrow().in_band_lifetimes;
+        self.is_collecting_in_band_lifetimes = self.sess.features_untracked().in_band_lifetimes;
 
         assert!(self.in_band_ty_params.is_empty());
 
@@ -912,7 +912,11 @@ impl<'a> LoweringContext<'a> {
             TyKind::Path(ref qself, ref path) => {
                 let id = self.lower_node_id(t.id);
                 let qpath = self.lower_qpath(t.id, qself, path, ParamMode::Explicit, itctx);
-                return self.ty_path(id, t.span, qpath);
+                let ty = self.ty_path(id, t.span, qpath);
+                if let hir::TyTraitObject(..) = ty.node {
+                    self.maybe_lint_bare_trait(t.span, t.id, qself.is_none() && path.is_global());
+                }
+                return ty;
             }
             TyKind::ImplicitSelf => {
                 hir::TyPath(hir::QPath::Resolved(None, P(hir::Path {
@@ -931,7 +935,7 @@ impl<'a> LoweringContext<'a> {
                 let expr = self.lower_body(None, |this| this.lower_expr(expr));
                 hir::TyTypeof(expr)
             }
-            TyKind::TraitObject(ref bounds, ..) => {
+            TyKind::TraitObject(ref bounds, kind) => {
                 let mut lifetime_bound = None;
                 let bounds = bounds.iter().filter_map(|bound| {
                     match *bound {
@@ -950,6 +954,9 @@ impl<'a> LoweringContext<'a> {
                 let lifetime_bound = lifetime_bound.unwrap_or_else(|| {
                     self.elided_lifetime(t.span)
                 });
+                if kind != TraitObjectSyntax::Dyn {
+                    self.maybe_lint_bare_trait(t.span, t.id, false);
+                }
                 hir::TyTraitObject(bounds, lifetime_bound)
             }
             TyKind::ImplTrait(ref bounds) => {
@@ -957,7 +964,7 @@ impl<'a> LoweringContext<'a> {
                 let span = t.span;
                 match itctx {
                     ImplTraitContext::Existential => {
-                        let has_feature = self.sess.features.borrow().conservative_impl_trait;
+                        let has_feature = self.sess.features_untracked().conservative_impl_trait;
                         if !t.span.allows_unstable() && !has_feature {
                             emit_feature_err(&self.sess.parse_sess, "conservative_impl_trait",
                                              t.span, GateIssue::Language,
@@ -981,7 +988,7 @@ impl<'a> LoweringContext<'a> {
                         }, lifetimes)
                     },
                     ImplTraitContext::Universal(def_id) => {
-                        let has_feature = self.sess.features.borrow().universal_impl_trait;
+                        let has_feature = self.sess.features_untracked().universal_impl_trait;
                         if !t.span.allows_unstable() && !has_feature {
                             emit_feature_err(&self.sess.parse_sess, "universal_impl_trait",
                                              t.span, GateIssue::Language,
@@ -2465,86 +2472,88 @@ impl<'a> LoweringContext<'a> {
     }
 
     fn lower_pat(&mut self, p: &Pat) -> P<hir::Pat> {
-        let LoweredNodeId { node_id, hir_id } = self.lower_node_id(p.id);
+        let node = match p.node {
+            PatKind::Wild => hir::PatKind::Wild,
+            PatKind::Ident(ref binding_mode, pth1, ref sub) => {
+                match self.resolver.get_resolution(p.id).map(|d| d.base_def()) {
+                    // `None` can occur in body-less function signatures
+                    def @ None | def @ Some(Def::Local(_)) => {
+                        let canonical_id = match def {
+                            Some(Def::Local(id)) => id,
+                            _ => p.id
+                        };
+                        hir::PatKind::Binding(self.lower_binding_mode(binding_mode),
+                                                canonical_id,
+                                                respan(pth1.span, pth1.node.name),
+                                                sub.as_ref().map(|x| self.lower_pat(x)))
+                    }
+                    Some(def) => {
+                        hir::PatKind::Path(hir::QPath::Resolved(None, P(hir::Path {
+                            span: pth1.span,
+                            def,
+                            segments: hir_vec![
+                                hir::PathSegment::from_name(pth1.node.name)
+                            ],
+                        })))
+                    }
+                }
+            }
+            PatKind::Lit(ref e) => hir::PatKind::Lit(P(self.lower_expr(e))),
+            PatKind::TupleStruct(ref path, ref pats, ddpos) => {
+                let qpath = self.lower_qpath(p.id, &None, path, ParamMode::Optional,
+                                                ImplTraitContext::Disallowed);
+                hir::PatKind::TupleStruct(qpath,
+                                            pats.iter().map(|x| self.lower_pat(x)).collect(),
+                                            ddpos)
+            }
+            PatKind::Path(ref qself, ref path) => {
+                hir::PatKind::Path(self.lower_qpath(p.id, qself, path, ParamMode::Optional,
+                                                    ImplTraitContext::Disallowed))
+            }
+            PatKind::Struct(ref path, ref fields, etc) => {
+                let qpath = self.lower_qpath(p.id, &None, path, ParamMode::Optional,
+                                                ImplTraitContext::Disallowed);
 
+                let fs = fields.iter()
+                                .map(|f| {
+                                    Spanned {
+                                        span: f.span,
+                                        node: hir::FieldPat {
+                                            name: self.lower_ident(f.node.ident),
+                                            pat: self.lower_pat(&f.node.pat),
+                                            is_shorthand: f.node.is_shorthand,
+                                        },
+                                    }
+                                })
+                                .collect();
+                hir::PatKind::Struct(qpath, fs, etc)
+            }
+            PatKind::Tuple(ref elts, ddpos) => {
+                hir::PatKind::Tuple(elts.iter().map(|x| self.lower_pat(x)).collect(), ddpos)
+            }
+            PatKind::Box(ref inner) => hir::PatKind::Box(self.lower_pat(inner)),
+            PatKind::Ref(ref inner, mutbl) => {
+                hir::PatKind::Ref(self.lower_pat(inner), self.lower_mutability(mutbl))
+            }
+            PatKind::Range(ref e1, ref e2, ref end) => {
+                hir::PatKind::Range(P(self.lower_expr(e1)),
+                                    P(self.lower_expr(e2)),
+                                    self.lower_range_end(end))
+            }
+            PatKind::Slice(ref before, ref slice, ref after) => {
+                hir::PatKind::Slice(before.iter().map(|x| self.lower_pat(x)).collect(),
+                            slice.as_ref().map(|x| self.lower_pat(x)),
+                            after.iter().map(|x| self.lower_pat(x)).collect())
+            }
+            PatKind::Paren(ref inner) => return self.lower_pat(inner),
+            PatKind::Mac(_) => panic!("Shouldn't exist here"),
+        };
+
+        let LoweredNodeId { node_id, hir_id } = self.lower_node_id(p.id);
         P(hir::Pat {
             id: node_id,
             hir_id,
-            node: match p.node {
-                PatKind::Wild => hir::PatKind::Wild,
-                PatKind::Ident(ref binding_mode, pth1, ref sub) => {
-                    match self.resolver.get_resolution(p.id).map(|d| d.base_def()) {
-                        // `None` can occur in body-less function signatures
-                        def @ None | def @ Some(Def::Local(_)) => {
-                            let canonical_id = match def {
-                                Some(Def::Local(id)) => id,
-                                _ => p.id
-                            };
-                            hir::PatKind::Binding(self.lower_binding_mode(binding_mode),
-                                                  canonical_id,
-                                                  respan(pth1.span, pth1.node.name),
-                                                  sub.as_ref().map(|x| self.lower_pat(x)))
-                        }
-                        Some(def) => {
-                            hir::PatKind::Path(hir::QPath::Resolved(None, P(hir::Path {
-                                span: pth1.span,
-                                def,
-                                segments: hir_vec![
-                                    hir::PathSegment::from_name(pth1.node.name)
-                                ],
-                            })))
-                        }
-                    }
-                }
-                PatKind::Lit(ref e) => hir::PatKind::Lit(P(self.lower_expr(e))),
-                PatKind::TupleStruct(ref path, ref pats, ddpos) => {
-                    let qpath = self.lower_qpath(p.id, &None, path, ParamMode::Optional,
-                                                 ImplTraitContext::Disallowed);
-                    hir::PatKind::TupleStruct(qpath,
-                                              pats.iter().map(|x| self.lower_pat(x)).collect(),
-                                              ddpos)
-                }
-                PatKind::Path(ref qself, ref path) => {
-                    hir::PatKind::Path(self.lower_qpath(p.id, qself, path, ParamMode::Optional,
-                                                        ImplTraitContext::Disallowed))
-                }
-                PatKind::Struct(ref path, ref fields, etc) => {
-                    let qpath = self.lower_qpath(p.id, &None, path, ParamMode::Optional,
-                                                 ImplTraitContext::Disallowed);
-
-                    let fs = fields.iter()
-                                   .map(|f| {
-                                       Spanned {
-                                           span: f.span,
-                                           node: hir::FieldPat {
-                                               name: self.lower_ident(f.node.ident),
-                                               pat: self.lower_pat(&f.node.pat),
-                                               is_shorthand: f.node.is_shorthand,
-                                           },
-                                       }
-                                   })
-                                   .collect();
-                    hir::PatKind::Struct(qpath, fs, etc)
-                }
-                PatKind::Tuple(ref elts, ddpos) => {
-                    hir::PatKind::Tuple(elts.iter().map(|x| self.lower_pat(x)).collect(), ddpos)
-                }
-                PatKind::Box(ref inner) => hir::PatKind::Box(self.lower_pat(inner)),
-                PatKind::Ref(ref inner, mutbl) => {
-                    hir::PatKind::Ref(self.lower_pat(inner), self.lower_mutability(mutbl))
-                }
-                PatKind::Range(ref e1, ref e2, ref end) => {
-                    hir::PatKind::Range(P(self.lower_expr(e1)),
-                                        P(self.lower_expr(e2)),
-                                        self.lower_range_end(end))
-                }
-                PatKind::Slice(ref before, ref slice, ref after) => {
-                    hir::PatKind::Slice(before.iter().map(|x| self.lower_pat(x)).collect(),
-                                slice.as_ref().map(|x| self.lower_pat(x)),
-                                after.iter().map(|x| self.lower_pat(x)).collect())
-                }
-                PatKind::Mac(_) => panic!("Shouldn't exist here"),
-            },
+            node,
             span: p.span,
         })
     }
@@ -2956,7 +2965,7 @@ impl<'a> LoweringContext<'a> {
 
             // Desugar ExprIfLet
             // From: `if let <pat> = <sub_expr> <body> [<else_opt>]`
-            ExprKind::IfLet(ref pat, ref sub_expr, ref body, ref else_opt) => {
+            ExprKind::IfLet(ref pats, ref sub_expr, ref body, ref else_opt) => {
                 // to:
                 //
                 //   match <sub_expr> {
@@ -2970,8 +2979,8 @@ impl<'a> LoweringContext<'a> {
                 {
                     let body = self.lower_block(body, false);
                     let body_expr = P(self.expr_block(body, ThinVec::new()));
-                    let pat = self.lower_pat(pat);
-                    arms.push(self.arm(hir_vec![pat], body_expr));
+                    let pats = pats.iter().map(|pat| self.lower_pat(pat)).collect();
+                    arms.push(self.arm(pats, body_expr));
                 }
 
                 // _ => [<else_opt>|()]
@@ -3000,7 +3009,7 @@ impl<'a> LoweringContext<'a> {
 
             // Desugar ExprWhileLet
             // From: `[opt_ident]: while let <pat> = <sub_expr> <body>`
-            ExprKind::WhileLet(ref pat, ref sub_expr, ref body, opt_label) => {
+            ExprKind::WhileLet(ref pats, ref sub_expr, ref body, opt_label) => {
                 // to:
                 //
                 //   [opt_ident]: loop {
@@ -3021,8 +3030,8 @@ impl<'a> LoweringContext<'a> {
                 // `<pat> => <body>`
                 let pat_arm = {
                     let body_expr = P(self.expr_block(body, ThinVec::new()));
-                    let pat = self.lower_pat(pat);
-                    self.arm(hir_vec![pat], body_expr)
+                    let pats = pats.iter().map(|pat| self.lower_pat(pat)).collect();
+                    self.arm(pats, body_expr)
                 };
 
                 // `_ => break`
@@ -3362,10 +3371,10 @@ impl<'a> LoweringContext<'a> {
                         v: &Visibility,
                         explicit_owner: Option<NodeId>)
                         -> hir::Visibility {
-        match *v {
-            Visibility::Public => hir::Public,
-            Visibility::Crate(..) => hir::Visibility::Crate,
-            Visibility::Restricted { ref path, id } => {
+        match v.node {
+            VisibilityKind::Public => hir::Public,
+            VisibilityKind::Crate(..) => hir::Visibility::Crate,
+            VisibilityKind::Restricted { ref path, id, .. } => {
                 hir::Visibility::Restricted {
                     path: P(self.lower_path(id, path, ParamMode::Explicit, true)),
                     id: if let Some(owner) = explicit_owner {
@@ -3375,7 +3384,7 @@ impl<'a> LoweringContext<'a> {
                     }
                 }
             }
-            Visibility::Inherited => hir::Inherited,
+            VisibilityKind::Inherited => hir::Inherited,
         }
     }
 
@@ -3685,7 +3694,6 @@ impl<'a> LoweringContext<'a> {
                     // The original ID is taken by the `PolyTraitRef`,
                     // so the `Ty` itself needs a different one.
                     id = self.next_id();
-
                     hir::TyTraitObject(hir_vec![principal], self.elided_lifetime(span))
                 } else {
                     hir::TyPath(hir::QPath::Resolved(None, path))
@@ -3701,6 +3709,16 @@ impl<'a> LoweringContext<'a> {
             id: self.next_id().node_id,
             span,
             name: hir::LifetimeName::Implicit,
+        }
+    }
+
+    fn maybe_lint_bare_trait(&self, span: Span, id: NodeId, is_global: bool) {
+        if self.sess.features_untracked().dyn_trait {
+            self.sess.buffer_lint_with_diagnostic(
+                builtin::BARE_TRAIT_OBJECT, id, span,
+                "trait objects without an explicit `dyn` are deprecated",
+                builtin::BuiltinLintDiagnostics::BareTraitObject(span, is_global)
+            )
         }
     }
 }

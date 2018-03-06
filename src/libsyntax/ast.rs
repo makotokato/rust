@@ -30,7 +30,7 @@ use tokenstream::{ThinTokenStream, TokenStream};
 use serialize::{self, Encoder, Decoder};
 use std::collections::HashSet;
 use std::fmt;
-use std::rc::Rc;
+use rustc_data_structures::sync::Lrc;
 use std::u32;
 
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Copy)]
@@ -562,7 +562,7 @@ impl Pat {
             PatKind::TupleStruct(_, ref s, _) | PatKind::Tuple(ref s, _) => {
                 s.iter().all(|p| p.walk(it))
             }
-            PatKind::Box(ref s) | PatKind::Ref(ref s, _) => {
+            PatKind::Box(ref s) | PatKind::Ref(ref s, _) | PatKind::Paren(ref s) => {
                 s.walk(it)
             }
             PatKind::Slice(ref before, ref slice, ref after) => {
@@ -656,6 +656,8 @@ pub enum PatKind {
     /// `[a, b, ..i, y, z]` is represented as:
     ///     `PatKind::Slice(box [a, b], Some(i), box [y, z])`
     Slice(Vec<P<Pat>>, Option<P<Pat>>, Vec<P<Pat>>),
+    /// Parentheses in patters used for grouping, i.e. `(PAT)`.
+    Paren(P<Pat>),
     /// A macro pattern; pre-expansion
     Mac(Mac),
 }
@@ -1085,7 +1087,7 @@ pub enum ExprKind {
     /// `if let pat = expr { block } else { expr }`
     ///
     /// This is desugared to a `match` expression.
-    IfLet(P<Pat>, P<Expr>, P<Block>, Option<P<Expr>>),
+    IfLet(Vec<P<Pat>>, P<Expr>, P<Block>, Option<P<Expr>>),
     /// A while loop, with an optional label
     ///
     /// `'label: while expr { block }`
@@ -1095,7 +1097,7 @@ pub enum ExprKind {
     /// `'label: while let pat = expr { block }`
     ///
     /// This is desugared to a combination of `loop` and `match` expressions.
-    WhileLet(P<Pat>, P<Expr>, P<Block>, Option<Label>),
+    WhileLet(Vec<P<Pat>>, P<Expr>, P<Block>, Option<Label>),
     /// A for loop, with an optional label
     ///
     /// `'label: for pat in expr { block }`
@@ -1272,7 +1274,7 @@ pub enum LitKind {
     /// A string literal (`"foo"`)
     Str(Symbol, StrStyle),
     /// A byte string (`b"foo"`)
-    ByteStr(Rc<Vec<u8>>),
+    ByteStr(Lrc<Vec<u8>>),
     /// A byte char (`b'f'`)
     Byte(u8),
     /// A character literal (`'a'`)
@@ -1937,10 +1939,12 @@ pub enum CrateSugar {
     JustCrate,
 }
 
+pub type Visibility = Spanned<VisibilityKind>;
+
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
-pub enum Visibility {
+pub enum VisibilityKind {
     Public,
-    Crate(Span, CrateSugar),
+    Crate(CrateSugar),
     Restricted { path: P<Path>, id: NodeId },
     Inherited,
 }

@@ -292,7 +292,9 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
 
         self.tcx.for_each_relevant_impl(
             trait_ref.def_id, trait_self_ty, |def_id| {
-                let impl_substs = self.fresh_substs_for_item(obligation.cause.span, def_id);
+                let impl_substs = self.fresh_substs_for_item(param_env.universe,
+                                                             obligation.cause.span,
+                                                             def_id);
                 let impl_trait_ref = tcx
                     .impl_trait_ref(def_id)
                     .unwrap()
@@ -497,7 +499,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                                         item_name: ast::Name,
                                         _impl_item_def_id: DefId,
                                         trait_item_def_id: DefId,
-                                        requirement: &fmt::Display)
+                                        requirement: &dyn fmt::Display)
                                         -> DiagnosticBuilder<'tcx>
     {
         let msg = "impl has stricter requirements than trait";
@@ -747,7 +749,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                     ty::TyTuple(ref tys, _) => tys.iter()
                         .map(|t| match t.sty {
                             ty::TypeVariants::TyTuple(ref tys, _) => ArgKind::Tuple(
-                                span,
+                                Some(span),
                                 tys.iter()
                                     .map(|ty| ("_".to_owned(), format!("{}", ty.sty)))
                                     .collect::<Vec<_>>()
@@ -756,7 +758,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                         }).collect(),
                     ref sty => vec![ArgKind::Arg("_".to_owned(), format!("{}", sty))],
                 };
-                if found.len()== expected.len() {
+                if found.len() == expected.len() {
                     self.report_closure_arg_mismatch(span,
                                                      found_span,
                                                      found_trait_ref,
@@ -815,7 +817,11 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         }
     }
 
-    fn get_fn_like_arguments(&self, node: hir::map::Node) -> (Span, Vec<ArgKind>) {
+    /// Given some node representing a fn-like thing in the HIR map,
+    /// returns a span and `ArgKind` information that describes the
+    /// arguments it expects. This can be supplied to
+    /// `report_arg_count_mismatch`.
+    pub fn get_fn_like_arguments(&self, node: hir::map::Node) -> (Span, Vec<ArgKind>) {
         match node {
             hir::map::NodeExpr(&hir::Expr {
                 node: hir::ExprClosure(_, ref _decl, id, span, _),
@@ -829,7 +835,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                             ..
                         } = arg.pat.clone().into_inner() {
                             ArgKind::Tuple(
-                                span,
+                                Some(span),
                                 args.iter().map(|pat| {
                                     let snippet = self.tcx.sess.codemap()
                                         .span_to_snippet(pat.span).unwrap();
@@ -862,7 +868,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                 (self.tcx.sess.codemap().def_span(span), decl.inputs.iter()
                         .map(|arg| match arg.clone().into_inner().node {
                     hir::TyTup(ref tys) => ArgKind::Tuple(
-                        arg.span,
+                        Some(arg.span),
                         tys.iter()
                             .map(|_| ("_".to_owned(), "_".to_owned()))
                             .collect::<Vec<_>>(),
@@ -870,11 +876,27 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                     _ => ArgKind::Arg("_".to_owned(), "_".to_owned())
                 }).collect::<Vec<ArgKind>>())
             }
+            hir::map::NodeVariant(&hir::Variant {
+                span,
+                node: hir::Variant_ {
+                    data: hir::VariantData::Tuple(ref fields, _),
+                    ..
+                },
+                ..
+            }) => {
+                (self.tcx.sess.codemap().def_span(span),
+                 fields.iter().map(|field| {
+                     ArgKind::Arg(format!("{}", field.name), "_".to_string())
+                 }).collect::<Vec<_>>())
+            }
             _ => panic!("non-FnLike node found: {:?}", node),
         }
     }
 
-    fn report_arg_count_mismatch(
+    /// Reports an error when the number of arguments needed by a
+    /// trait match doesn't match the number that the expression
+    /// provides.
+    pub fn report_arg_count_mismatch(
         &self,
         span: Span,
         found_span: Option<Span>,
@@ -1174,6 +1196,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                            -> bool {
         struct ParamToVarFolder<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
             infcx: &'a InferCtxt<'a, 'gcx, 'tcx>,
+            param_env: ty::ParamEnv<'tcx>,
             var_map: FxHashMap<Ty<'tcx>, Ty<'tcx>>
         }
 
@@ -1183,9 +1206,14 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             fn fold_ty(&mut self, ty: Ty<'tcx>) -> Ty<'tcx> {
                 if let ty::TyParam(ty::ParamTy {name, ..}) = ty.sty {
                     let infcx = self.infcx;
-                    self.var_map.entry(ty).or_insert_with(||
-                        infcx.next_ty_var(
-                            TypeVariableOrigin::TypeParameterDefinition(DUMMY_SP, name)))
+                    let param_env = self.param_env;
+                    self.var_map
+                        .entry(ty)
+                        .or_insert_with(|| {
+                            let origin = TypeVariableOrigin::TypeParameterDefinition(DUMMY_SP,
+                                                                                     name);
+                            infcx.next_ty_var(param_env.universe, origin)
+                        })
                 } else {
                     ty.super_fold_with(self)
                 }
@@ -1197,6 +1225,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
 
             let cleaned_pred = pred.fold_with(&mut ParamToVarFolder {
                 infcx: self,
+                param_env,
                 var_map: FxHashMap()
             });
 
@@ -1385,13 +1414,34 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
     }
 }
 
-enum ArgKind {
+/// Summarizes information
+pub enum ArgKind {
+    /// An argument of non-tuple type. Parameters are (name, ty)
     Arg(String, String),
-    Tuple(Span, Vec<(String, String)>),
+
+    /// An argument of tuple type. For a "found" argument, the span is
+    /// the locationo in the source of the pattern. For a "expected"
+    /// argument, it will be None. The vector is a list of (name, ty)
+    /// strings for the components of the tuple.
+    Tuple(Option<Span>, Vec<(String, String)>),
 }
 
 impl ArgKind {
     fn empty() -> ArgKind {
         ArgKind::Arg("_".to_owned(), "_".to_owned())
+    }
+
+    /// Creates an `ArgKind` from the expected type of an
+    /// argument. This has no name (`_`) and no source spans..
+    pub fn from_expected_ty(t: Ty<'_>) -> ArgKind {
+        match t.sty {
+            ty::TyTuple(ref tys, _) => ArgKind::Tuple(
+                None,
+                tys.iter()
+                   .map(|ty| ("_".to_owned(), format!("{}", ty.sty)))
+                   .collect::<Vec<_>>()
+            ),
+            _ => ArgKind::Arg("_".to_owned(), format!("{}", t.sty)),
+        }
     }
 }

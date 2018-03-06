@@ -1,13 +1,13 @@
 error[E0120]: the Drop trait may only be implemented on structures
   --> $DIR/E0117.rs:11:15
    |
-11 | impl Drop for u32 {} //~ ERROR E0117
+LL | impl Drop for u32 {} //~ ERROR E0117
    |               ^^^ implementing Drop requires a struct
 
 error[E0117]: only traits defined in the current crate can be implemented for arbitrary types
   --> $DIR/E0117.rs:11:1
    |
-11 | impl Drop for u32 {} //~ ERROR E0117
+LL | impl Drop for u32 {} //~ ERROR E0117
    | ^^^^^^^^^^^^^^^^^^^^ impl doesn't use types inside crate
    |
    = note: the impl does not reference any types defined in this crate
@@ -15,3 +15,5 @@ error[E0117]: only traits defined in the current crate can be implemented for ar
 
 error: aborting due to 2 previous errors
 
+You've got a few errors: E0117, E0120
+If you want more information on an error, try using "rustc --explain E0117"

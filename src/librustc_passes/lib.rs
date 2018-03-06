@@ -25,6 +25,7 @@
 extern crate rustc;
 extern crate rustc_const_eval;
 extern crate rustc_const_math;
+extern crate rustc_data_structures;
 
 #[macro_use]
 extern crate log;
@@ -42,9 +43,7 @@ pub mod consts;
 pub mod hir_stats;
 pub mod loops;
 mod mir_stats;
-pub mod static_recursion;
 
-#[cfg(not(stage0))] // remove after the next snapshot
 __build_diagnostic_array! { librustc_passes, DIAGNOSTICS }
 
 pub fn provide(providers: &mut Providers) {

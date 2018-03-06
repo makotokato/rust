@@ -21,7 +21,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
     pub(in borrow_check) fn explain_why_borrow_contains_point(
         &self,
         context: Context,
-        borrow: &BorrowData<'_>,
+        borrow: &BorrowData<'tcx>,
         err: &mut DiagnosticBuilder<'_>,
     ) {
         if let Some(regioncx) = &self.nonlexical_regioncx {
@@ -70,9 +70,18 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                         }
                     }
 
-                    _ => {
-                        cause.label_diagnostic(mir, err);
+                    Cause::UniversalRegion(region_vid) => {
+                        if let Some(region) = regioncx.to_error_region(region_vid) {
+                            self.tcx.note_and_explain_free_region(
+                                err,
+                                "borrowed value must be valid for ",
+                                region,
+                                "...",
+                            );
+                        }
                     }
+
+                    _ => {}
                 }
             }
         }
@@ -176,7 +185,7 @@ impl<'gcx, 'tcx> UseFinder<'gcx, 'tcx> {
         None
     }
 
-    fn def_use(&self, location: Location, thing: &MirVisitable<'tcx>) -> (bool, bool) {
+    fn def_use(&self, location: Location, thing: &dyn MirVisitable<'tcx>) -> (bool, bool) {
         let mut visitor = DefUseVisitor {
             defined: false,
             used: false,

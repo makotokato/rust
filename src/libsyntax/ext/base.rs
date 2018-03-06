@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::iter;
 use std::path::PathBuf;
 use std::rc::Rc;
+use rustc_data_structures::sync::Lrc;
 use std::default::Default;
 use tokenstream::{self, TokenStream};
 
@@ -615,15 +616,15 @@ pub trait Resolver {
     fn is_whitelisted_legacy_custom_derive(&self, name: Name) -> bool;
 
     fn visit_expansion(&mut self, mark: Mark, expansion: &Expansion, derives: &[Mark]);
-    fn add_builtin(&mut self, ident: ast::Ident, ext: Rc<SyntaxExtension>);
+    fn add_builtin(&mut self, ident: ast::Ident, ext: Lrc<SyntaxExtension>);
 
     fn resolve_imports(&mut self);
     // Resolves attribute and derive legacy macros from `#![plugin(..)]`.
     fn find_legacy_attr_invoc(&mut self, attrs: &mut Vec<Attribute>) -> Option<Attribute>;
     fn resolve_invoc(&mut self, invoc: &mut Invocation, scope: Mark, force: bool)
-                     -> Result<Option<Rc<SyntaxExtension>>, Determinacy>;
+                     -> Result<Option<Lrc<SyntaxExtension>>, Determinacy>;
     fn resolve_macro(&mut self, scope: Mark, path: &ast::Path, kind: MacroKind, force: bool)
-                     -> Result<Rc<SyntaxExtension>, Determinacy>;
+                     -> Result<Lrc<SyntaxExtension>, Determinacy>;
     fn check_unused_macros(&self);
 }
 
@@ -642,16 +643,16 @@ impl Resolver for DummyResolver {
     fn is_whitelisted_legacy_custom_derive(&self, _name: Name) -> bool { false }
 
     fn visit_expansion(&mut self, _invoc: Mark, _expansion: &Expansion, _derives: &[Mark]) {}
-    fn add_builtin(&mut self, _ident: ast::Ident, _ext: Rc<SyntaxExtension>) {}
+    fn add_builtin(&mut self, _ident: ast::Ident, _ext: Lrc<SyntaxExtension>) {}
 
     fn resolve_imports(&mut self) {}
     fn find_legacy_attr_invoc(&mut self, _attrs: &mut Vec<Attribute>) -> Option<Attribute> { None }
     fn resolve_invoc(&mut self, _invoc: &mut Invocation, _scope: Mark, _force: bool)
-                     -> Result<Option<Rc<SyntaxExtension>>, Determinacy> {
+                     -> Result<Option<Lrc<SyntaxExtension>>, Determinacy> {
         Err(Determinacy::Determined)
     }
     fn resolve_macro(&mut self, _scope: Mark, _path: &ast::Path, _kind: MacroKind,
-                     _force: bool) -> Result<Rc<SyntaxExtension>, Determinacy> {
+                     _force: bool) -> Result<Lrc<SyntaxExtension>, Determinacy> {
         Err(Determinacy::Determined)
     }
     fn check_unused_macros(&self) {}
@@ -890,8 +891,8 @@ pub fn check_zero_tts(cx: &ExtCtxt,
     }
 }
 
-/// Extract the string literal from the first token of `tts`. If this
-/// is not a string literal, emit an error and return None.
+/// Interpreting `tts` as a comma-separated sequence of expressions,
+/// expect exactly one string literal, or emit an error and return None.
 pub fn get_single_str_from_tts(cx: &mut ExtCtxt,
                                sp: Span,
                                tts: &[tokenstream::TokenTree],
@@ -903,6 +904,8 @@ pub fn get_single_str_from_tts(cx: &mut ExtCtxt,
         return None
     }
     let ret = panictry!(p.parse_expr());
+    let _ = p.eat(&token::Comma);
+
     if p.token != token::Eof {
         cx.span_err(sp, &format!("{} takes 1 argument", name));
     }

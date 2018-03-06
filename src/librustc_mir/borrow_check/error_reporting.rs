@@ -14,10 +14,9 @@ use rustc::mir::{BorrowKind, Field, Local, LocalKind, Location, Operand};
 use rustc::mir::{Place, ProjectionElem, Rvalue, Statement, StatementKind};
 use rustc::ty::{self, RegionKind};
 use rustc_data_structures::indexed_vec::Idx;
+use rustc_data_structures::sync::Lrc;
 
-use std::rc::Rc;
-
-use super::{MirBorrowckCtxt, Context};
+use super::{Context, MirBorrowckCtxt};
 use super::{InitializationRequiringAction, PrefixSet};
 use dataflow::{ActiveBorrows, BorrowData, FlowAtLocation, MovingOutStatements};
 use dataflow::move_paths::MovePathIndex;
@@ -97,7 +96,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                         } else {
                             true
                         }
-                    },
+                    }
                     _ => true,
                 };
 
@@ -107,9 +106,11 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                         None => "value".to_owned(),
                     };
 
-                    err.note(&format!("move occurs because {} has type `{}`, \
-                                       which does not implement the `Copy` trait",
-                                       note_msg, ty));
+                    err.note(&format!(
+                        "move occurs because {} has type `{}`, \
+                         which does not implement the `Copy` trait",
+                        note_msg, ty
+                    ));
                 }
             }
 
@@ -155,7 +156,8 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
             span,
             &self.describe_place(place).unwrap_or("_".to_owned()),
             self.retrieve_borrow_span(borrow),
-            &self.describe_place(&borrow.borrowed_place).unwrap_or("_".to_owned()),
+            &self.describe_place(&borrow.borrowed_place)
+                .unwrap_or("_".to_owned()),
             Origin::Mir,
         );
 
@@ -176,8 +178,14 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         use rustc::hir::ExprClosure;
         use rustc::mir::AggregateKind;
 
-        let local = match self.mir[location.block].statements.get(location.statement_index) {
-            Some(&Statement { kind: StatementKind::Assign(Place::Local(local), _), .. }) => local,
+        let local = match self.mir[location.block]
+            .statements
+            .get(location.statement_index)
+        {
+            Some(&Statement {
+                kind: StatementKind::Assign(Place::Local(local), _),
+                ..
+            }) => local,
             _ => return None,
         };
 
@@ -203,8 +211,8 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                             .with_freevars(node_id, |freevars| {
                                 for (v, place) in freevars.iter().zip(places) {
                                     match *place {
-                                        Operand::Copy(Place::Local(l)) |
-                                        Operand::Move(Place::Local(l)) if local == l =>
+                                        Operand::Copy(Place::Local(l))
+                                        | Operand::Move(Place::Local(l)) if local == l =>
                                         {
                                             debug!(
                                                 "find_closure_span: found captured local {:?}",
@@ -233,7 +241,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         context: Context,
         (place, span): (&Place<'tcx>, Span),
         gen_borrow_kind: BorrowKind,
-        issued_borrow: &BorrowData,
+        issued_borrow: &BorrowData<'tcx>,
         end_issued_loan_span: Option<Span>,
     ) {
         let issued_span = self.retrieve_borrow_span(issued_borrow);
@@ -256,8 +264,8 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
             "immutable",
             "mutable",
         ) {
-            (BorrowKind::Shared, lft, _, BorrowKind::Mut { .. }, _, rgt) |
-            (BorrowKind::Mut { .. }, _, lft, BorrowKind::Shared, rgt, _) => self.tcx
+            (BorrowKind::Shared, lft, _, BorrowKind::Mut { .. }, _, rgt)
+            | (BorrowKind::Mut { .. }, _, lft, BorrowKind::Shared, rgt, _) => self.tcx
                 .cannot_reborrow_already_borrowed(
                     span,
                     &desc_place,
@@ -356,11 +364,13 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         context: Context,
         borrow: &BorrowData<'tcx>,
         drop_span: Span,
-        borrows: &ActiveBorrows<'cx, 'gcx, 'tcx>
+        borrows: &ActiveBorrows<'cx, 'gcx, 'tcx>,
     ) {
         let end_span = borrows.opt_region_end_span(&borrow.region);
         let scope_tree = borrows.0.scope_tree();
-        let root_place = self.prefixes(&borrow.borrowed_place, PrefixSet::All).last().unwrap();
+        let root_place = self.prefixes(&borrow.borrowed_place, PrefixSet::All)
+            .last()
+            .unwrap();
 
         let borrow_span = self.mir.source_info(borrow.location).span;
         let proper_span = match *root_place {
@@ -368,13 +378,18 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
             _ => drop_span,
         };
 
-        if self.access_place_error_reported.contains(&(root_place.clone(), borrow_span)) {
-            debug!("suppressing access_place error when borrow doesn't live long enough for {:?}",
-                   borrow_span);
+        if self.access_place_error_reported
+            .contains(&(root_place.clone(), borrow_span))
+        {
+            debug!(
+                "suppressing access_place error when borrow doesn't live long enough for {:?}",
+                borrow_span
+            );
             return;
         }
 
-        self.access_place_error_reported.insert((root_place.clone(), borrow_span));
+        self.access_place_error_reported
+            .insert((root_place.clone(), borrow_span));
 
         match (borrow.region, &self.describe_place(&borrow.borrowed_place)) {
             (RegionKind::ReScope(_), Some(name)) => {
@@ -386,9 +401,9 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     drop_span,
                     borrow_span,
                     proper_span,
-                    end_span
+                    end_span,
                 );
-            },
+            }
             (RegionKind::ReScope(_), None) => {
                 self.report_scoped_temporary_value_does_not_live_long_enough(
                     context,
@@ -397,14 +412,14 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     drop_span,
                     borrow_span,
                     proper_span,
-                    end_span
+                    end_span,
                 );
-            },
-            (RegionKind::ReEarlyBound(_), Some(name)) |
-            (RegionKind::ReFree(_), Some(name)) |
-            (RegionKind::ReStatic, Some(name)) |
-            (RegionKind::ReEmpty, Some(name)) |
-            (RegionKind::ReVar(_), Some(name)) => {
+            }
+            (RegionKind::ReEarlyBound(_), Some(name))
+            | (RegionKind::ReFree(_), Some(name))
+            | (RegionKind::ReStatic, Some(name))
+            | (RegionKind::ReEmpty, Some(name))
+            | (RegionKind::ReVar(_), Some(name)) => {
                 self.report_unscoped_local_value_does_not_live_long_enough(
                     context,
                     name,
@@ -415,12 +430,12 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     proper_span,
                     end_span,
                 );
-            },
-            (RegionKind::ReEarlyBound(_), None) |
-            (RegionKind::ReFree(_), None) |
-            (RegionKind::ReStatic, None) |
-            (RegionKind::ReEmpty, None) |
-            (RegionKind::ReVar(_), None) => {
+            }
+            (RegionKind::ReEarlyBound(_), None)
+            | (RegionKind::ReFree(_), None)
+            | (RegionKind::ReStatic, None)
+            | (RegionKind::ReEmpty, None)
+            | (RegionKind::ReVar(_), None) => {
                 self.report_unscoped_temporary_value_does_not_live_long_enough(
                     context,
                     &scope_tree,
@@ -430,13 +445,13 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     proper_span,
                     end_span,
                 );
-            },
-            (RegionKind::ReLateBound(_, _), _) |
-            (RegionKind::ReSkolemized(_, _), _) |
-            (RegionKind::ReClosureBound(_), _) |
-            (RegionKind::ReErased, _) => {
+            }
+            (RegionKind::ReLateBound(_, _), _)
+            | (RegionKind::ReSkolemized(_, _), _)
+            | (RegionKind::ReClosureBound(_), _)
+            | (RegionKind::ReErased, _) => {
                 span_bug!(drop_span, "region does not make sense in this context");
-            },
+            }
         }
     }
 
@@ -444,18 +459,23 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         &mut self,
         context: Context,
         name: &String,
-        _scope_tree: &Rc<ScopeTree>,
+        _scope_tree: &Lrc<ScopeTree>,
         borrow: &BorrowData<'tcx>,
         drop_span: Span,
         borrow_span: Span,
         _proper_span: Span,
         end_span: Option<Span>,
     ) {
-        let mut err = self.tcx.path_does_not_live_long_enough(borrow_span,
-                                                              &format!("`{}`", name),
-                                                              Origin::Mir);
+        let mut err = self.tcx.path_does_not_live_long_enough(
+            borrow_span,
+            &format!("`{}`", name),
+            Origin::Mir,
+        );
         err.span_label(borrow_span, "borrowed value does not live long enough");
-        err.span_label(drop_span, format!("`{}` dropped here while still borrowed", name));
+        err.span_label(
+            drop_span,
+            format!("`{}` dropped here while still borrowed", name),
+        );
         if let Some(end) = end_span {
             err.span_label(end, "borrowed value needs to live until here");
         }
@@ -466,18 +486,21 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
     fn report_scoped_temporary_value_does_not_live_long_enough(
         &mut self,
         context: Context,
-        _scope_tree: &Rc<ScopeTree>,
+        _scope_tree: &Lrc<ScopeTree>,
         borrow: &BorrowData<'tcx>,
         drop_span: Span,
         _borrow_span: Span,
         proper_span: Span,
         end_span: Option<Span>,
     ) {
-        let mut err = self.tcx.path_does_not_live_long_enough(proper_span,
-                                                              "borrowed value",
-                                                              Origin::Mir);
+        let mut err =
+            self.tcx
+                .path_does_not_live_long_enough(proper_span, "borrowed value", Origin::Mir);
         err.span_label(proper_span, "temporary value does not live long enough");
-        err.span_label(drop_span, "temporary value dropped here while still borrowed");
+        err.span_label(
+            drop_span,
+            "temporary value dropped here while still borrowed",
+        );
         err.note("consider using a `let` binding to increase its lifetime");
         if let Some(end) = end_span {
             err.span_label(end, "temporary value needs to live until here");
@@ -490,21 +513,38 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         &mut self,
         context: Context,
         name: &String,
-        scope_tree: &Rc<ScopeTree>,
+        scope_tree: &Lrc<ScopeTree>,
         borrow: &BorrowData<'tcx>,
         drop_span: Span,
         borrow_span: Span,
         _proper_span: Span,
         _end_span: Option<Span>,
     ) {
-        let mut err = self.tcx.path_does_not_live_long_enough(borrow_span,
-                                                              &format!("`{}`", name),
-                                                              Origin::Mir);
+        debug!(
+            "report_unscoped_local_value_does_not_live_long_enough(\
+             {:?}, {:?}, {:?}, {:?}, {:?}, {:?}\
+             )",
+            context, name, scope_tree, borrow, drop_span, borrow_span
+        );
+
+        let mut err = self.tcx.path_does_not_live_long_enough(
+            borrow_span,
+            &format!("`{}`", name),
+            Origin::Mir,
+        );
         err.span_label(borrow_span, "borrowed value does not live long enough");
         err.span_label(drop_span, "borrowed value only lives until here");
-        self.tcx.note_and_explain_region(scope_tree, &mut err,
-                                         "borrowed value must be valid for ",
-                                         borrow.region, "...");
+
+        if !self.tcx.nll() {
+            self.tcx.note_and_explain_region(
+                scope_tree,
+                &mut err,
+                "borrowed value must be valid for ",
+                borrow.region,
+                "...",
+            );
+        }
+
         self.explain_why_borrow_contains_point(context, borrow, &mut err);
         err.emit();
     }
@@ -512,21 +552,36 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
     fn report_unscoped_temporary_value_does_not_live_long_enough(
         &mut self,
         context: Context,
-        scope_tree: &Rc<ScopeTree>,
+        scope_tree: &Lrc<ScopeTree>,
         borrow: &BorrowData<'tcx>,
         drop_span: Span,
         _borrow_span: Span,
         proper_span: Span,
-        _end_span: Option<Span>
+        _end_span: Option<Span>,
     ) {
-        let mut err = self.tcx.path_does_not_live_long_enough(proper_span,
-                                                              "borrowed value",
-                                                              Origin::Mir);
+        debug!(
+            "report_unscoped_temporary_value_does_not_live_long_enough(\
+             {:?}, {:?}, {:?}, {:?}, {:?}\
+             )",
+            context, scope_tree, borrow, drop_span, proper_span
+        );
+
+        let mut err =
+            self.tcx
+                .path_does_not_live_long_enough(proper_span, "borrowed value", Origin::Mir);
         err.span_label(proper_span, "temporary value does not live long enough");
         err.span_label(drop_span, "temporary value only lives until here");
-        self.tcx.note_and_explain_region(scope_tree, &mut err,
-                                         "borrowed value must be valid for ",
-                                         borrow.region, "...");
+
+        if !self.tcx.nll() {
+            self.tcx.note_and_explain_region(
+                scope_tree,
+                &mut err,
+                "borrowed value must be valid for ",
+                borrow.region,
+                "...",
+            );
+        }
+
         self.explain_why_borrow_contains_point(context, borrow, &mut err);
         err.emit();
     }
@@ -535,7 +590,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         &mut self,
         context: Context,
         (place, span): (&Place<'tcx>, Span),
-        loan: &BorrowData,
+        loan: &BorrowData<'tcx>,
     ) {
         let mut err = self.tcx.cannot_assign_to_borrowed(
             span,
@@ -707,9 +762,9 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                 ProjectionElem::Field(_, field_type) => {
                     self.describe_field_from_ty(&field_type, field)
                 }
-                ProjectionElem::Index(..) |
-                ProjectionElem::ConstantIndex { .. } |
-                ProjectionElem::Subslice { .. } => {
+                ProjectionElem::Index(..)
+                | ProjectionElem::ConstantIndex { .. }
+                | ProjectionElem::Subslice { .. } => {
                     format!("{}", self.describe_field(&proj.base, field))
                 }
             },
@@ -766,13 +821,11 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
             Place::Local(local) => {
                 let local = &self.mir.local_decls[*local];
                 Some(local.ty)
-            },
+            }
             Place::Static(ref st) => Some(st.ty),
-            Place::Projection(ref proj) => {
-                match proj.elem {
-                    ProjectionElem::Field(_, ty) => Some(ty),
-                    _ => None,
-                }
+            Place::Projection(ref proj) => match proj.elem {
+                ProjectionElem::Field(_, ty) => Some(ty),
+                _ => None,
             },
         }
     }

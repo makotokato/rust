@@ -16,13 +16,16 @@ use ich::Fingerprint;
 
 use ich;
 use lint;
+use lint::builtin::BuiltinLintDiagnostics;
 use middle::allocator::AllocatorKind;
 use middle::dependency_format;
 use session::search_paths::PathKind;
-use session::config::{BorrowckMode, DebugInfoLevel, OutputType, Epoch};
+use session::config::{DebugInfoLevel, OutputType, Epoch};
 use ty::tls;
 use util::nodemap::{FxHashMap, FxHashSet};
 use util::common::{duration_to_secs_str, ErrorReported};
+
+use rustc_data_structures::sync::Lrc;
 
 use syntax::ast::NodeId;
 use errors::{self, DiagnosticBuilder, DiagnosticId};
@@ -47,7 +50,6 @@ use std::env;
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::{Once, ONCE_INIT};
 use std::time::Duration;
 
@@ -91,7 +93,8 @@ pub struct Session {
     /// multiple crates with the same name to coexist. See the
     /// trans::back::symbol_names module for more information.
     pub crate_disambiguator: RefCell<Option<CrateDisambiguator>>,
-    pub features: RefCell<feature_gate::Features>,
+
+    features: RefCell<Option<feature_gate::Features>>,
 
     /// The maximum recursion limit for potentially infinitely recursive
     /// operations such as auto-dereference and monomorphization.
@@ -192,6 +195,7 @@ impl Session {
             None => bug!("accessing disambiguator before initialization"),
         }
     }
+
     pub fn struct_span_warn<'a, S: Into<MultiSpan>>(&'a self,
                                                     sp: S,
                                                     msg: &str)
@@ -341,7 +345,18 @@ impl Session {
                                            sp: S,
                                            msg: &str) {
         match *self.buffered_lints.borrow_mut() {
-            Some(ref mut buffer) => buffer.add_lint(lint, id, sp.into(), msg),
+            Some(ref mut buffer) => buffer.add_lint(lint, id, sp.into(),
+                                                    msg, BuiltinLintDiagnostics::Normal),
+            None => bug!("can't buffer lints after HIR lowering"),
+        }
+    }
+
+    pub fn buffer_lint_with_diagnostic<S: Into<MultiSpan>>(&self,
+        lint: &'static lint::Lint, id: ast::NodeId, sp: S,
+        msg: &str, diagnostic: BuiltinLintDiagnostics) {
+        match *self.buffered_lints.borrow_mut() {
+            Some(ref mut buffer) => buffer.add_lint(lint, id, sp.into(),
+                                                    msg, diagnostic),
             None => bug!("can't buffer lints after HIR lowering"),
         }
     }
@@ -443,16 +458,22 @@ impl Session {
         self.opts.debugging_opts.print_llvm_passes
     }
 
-    /// If true, we should use NLL-style region checking instead of
-    /// lexical style.
-    pub fn nll(&self) -> bool {
-        self.features.borrow().nll || self.opts.debugging_opts.nll
+    /// Get the features enabled for the current compilation session.
+    /// DO NOT USE THIS METHOD if there is a TyCtxt available, as it circumvents
+    /// dependency tracking. Use tcx.features() instead.
+    #[inline]
+    pub fn features_untracked(&self) -> cell::Ref<feature_gate::Features> {
+        let features = self.features.borrow();
+
+        if features.is_none() {
+            bug!("Access to Session::features before it is initialized");
+        }
+
+        cell::Ref::map(features, |r| r.as_ref().unwrap())
     }
 
-    /// If true, we should use the MIR-based borrowck (we may *also* use
-    /// the AST-based borrowck).
-    pub fn use_mir(&self) -> bool {
-        self.borrowck_mode().use_mir()
+    pub fn init_features(&self, features: feature_gate::Features) {
+        *(self.features.borrow_mut()) = Some(features);
     }
 
     /// If true, we should gather causal information during NLL
@@ -460,42 +481,6 @@ impl Session {
     /// now it is too unoptimized.
     pub fn nll_dump_cause(&self) -> bool {
         self.opts.debugging_opts.nll_dump_cause
-    }
-
-    /// If true, we should enable two-phase borrows checks. This is
-    /// done with either `-Ztwo-phase-borrows` or with
-    /// `#![feature(nll)]`.
-    pub fn two_phase_borrows(&self) -> bool {
-        self.features.borrow().nll || self.opts.debugging_opts.two_phase_borrows
-    }
-
-    /// What mode(s) of borrowck should we run? AST? MIR? both?
-    /// (Also considers the `#![feature(nll)]` setting.)
-    pub fn borrowck_mode(&self) -> BorrowckMode {
-        match self.opts.borrowck_mode {
-            mode @ BorrowckMode::Mir |
-            mode @ BorrowckMode::Compare => mode,
-
-            mode @ BorrowckMode::Ast => {
-                if self.nll() {
-                    BorrowckMode::Mir
-                } else {
-                    mode
-                }
-            }
-
-        }
-    }
-
-    /// Should we emit EndRegion MIR statements? These are consumed by
-    /// MIR borrowck, but not when NLL is used. They are also consumed
-    /// by the validation stuff.
-    pub fn emit_end_regions(&self) -> bool {
-        // FIXME(#46875) -- we should not emit end regions when NLL is enabled,
-        // but for now we can't stop doing so because it causes false positives
-        self.opts.debugging_opts.emit_end_regions ||
-            self.opts.debugging_opts.mir_emit_validate > 0 ||
-            self.use_mir()
     }
 
     /// Calculates the flavor of LTO to use for this compilation.
@@ -869,6 +854,10 @@ impl Session {
     pub fn rust_2018(&self) -> bool {
         self.opts.debugging_opts.epoch >= Epoch::Epoch2018
     }
+
+    pub fn epoch(&self) -> Epoch {
+        self.opts.debugging_opts.epoch
+    }
 }
 
 pub fn build_session(sopts: config::Options,
@@ -880,15 +869,15 @@ pub fn build_session(sopts: config::Options,
     build_session_with_codemap(sopts,
                                local_crate_source_file,
                                registry,
-                               Rc::new(codemap::CodeMap::new(file_path_mapping)),
+                               Lrc::new(codemap::CodeMap::new(file_path_mapping)),
                                None)
 }
 
 pub fn build_session_with_codemap(sopts: config::Options,
                                   local_crate_source_file: Option<PathBuf>,
                                   registry: errors::registry::Registry,
-                                  codemap: Rc<codemap::CodeMap>,
-                                  emitter_dest: Option<Box<Write + Send>>)
+                                  codemap: Lrc<codemap::CodeMap>,
+                                  emitter_dest: Option<Box<dyn Write + Send>>)
                                   -> Session {
     // FIXME: This is not general enough to make the warning lint completely override
     // normal diagnostic warnings, since the warning lint can also be denied and changed
@@ -907,23 +896,26 @@ pub fn build_session_with_codemap(sopts: config::Options,
 
     let external_macro_backtrace = sopts.debugging_opts.external_macro_backtrace;
 
-    let emitter: Box<Emitter> = match (sopts.error_format, emitter_dest) {
+    let emitter: Box<dyn Emitter> = match (sopts.error_format, emitter_dest) {
         (config::ErrorOutputType::HumanReadable(color_config), None) => {
-            Box::new(EmitterWriter::stderr(color_config,
-                                           Some(codemap.clone()),
-                                           false,
-                                           sopts.debugging_opts.teach))
+            Box::new(EmitterWriter::stderr(color_config, Some(codemap.clone()),
+                     false, sopts.debugging_opts.teach)
+                     .ui_testing(sopts.debugging_opts.ui_testing))
         }
         (config::ErrorOutputType::HumanReadable(_), Some(dst)) => {
-            Box::new(EmitterWriter::new(dst, Some(codemap.clone()), false, false))
+            Box::new(EmitterWriter::new(dst, Some(codemap.clone()),
+                     false, false)
+                     .ui_testing(sopts.debugging_opts.ui_testing))
         }
         (config::ErrorOutputType::Json(pretty), None) => {
             Box::new(JsonEmitter::stderr(Some(registry), codemap.clone(),
-                     pretty, sopts.debugging_opts.approximate_suggestions))
+                     pretty, sopts.debugging_opts.approximate_suggestions)
+                     .ui_testing(sopts.debugging_opts.ui_testing))
         }
         (config::ErrorOutputType::Json(pretty), Some(dst)) => {
             Box::new(JsonEmitter::new(dst, Some(registry), codemap.clone(),
-                     pretty, sopts.debugging_opts.approximate_suggestions))
+                     pretty, sopts.debugging_opts.approximate_suggestions)
+                     .ui_testing(sopts.debugging_opts.ui_testing))
         }
         (config::ErrorOutputType::Short(color_config), None) => {
             Box::new(EmitterWriter::stderr(color_config, Some(codemap.clone()), true, false))
@@ -952,7 +944,7 @@ pub fn build_session_with_codemap(sopts: config::Options,
 pub fn build_session_(sopts: config::Options,
                       local_crate_source_file: Option<PathBuf>,
                       span_diagnostic: errors::Handler,
-                      codemap: Rc<codemap::CodeMap>)
+                      codemap: Lrc<codemap::CodeMap>)
                       -> Session {
     let host = match Target::search(config::host_triple()) {
         Ok(t) => t,
@@ -1009,7 +1001,7 @@ pub fn build_session_(sopts: config::Options,
         crate_types: RefCell::new(Vec::new()),
         dependency_formats: RefCell::new(FxHashMap()),
         crate_disambiguator: RefCell::new(None),
-        features: RefCell::new(feature_gate::Features::new()),
+        features: RefCell::new(None),
         recursion_limit: Cell::new(64),
         type_length_limit: Cell::new(1048576),
         next_node_id: Cell::new(NodeId::new(1)),
@@ -1103,7 +1095,7 @@ pub enum IncrCompSession {
 }
 
 pub fn early_error(output: config::ErrorOutputType, msg: &str) -> ! {
-    let emitter: Box<Emitter> = match output {
+    let emitter: Box<dyn Emitter> = match output {
         config::ErrorOutputType::HumanReadable(color_config) => {
             Box::new(EmitterWriter::stderr(color_config, None, false, false))
         }
@@ -1118,7 +1110,7 @@ pub fn early_error(output: config::ErrorOutputType, msg: &str) -> ! {
 }
 
 pub fn early_warn(output: config::ErrorOutputType, msg: &str) {
-    let emitter: Box<Emitter> = match output {
+    let emitter: Box<dyn Emitter> = match output {
         config::ErrorOutputType::HumanReadable(color_config) => {
             Box::new(EmitterWriter::stderr(color_config, None, false, false))
         }

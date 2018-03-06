@@ -24,7 +24,7 @@ use rustc::middle::cstore::CrateStore;
 use rustc::middle::privacy::AccessLevels;
 use rustc::ty::{self, TyCtxt, Resolutions, AllArenas};
 use rustc::traits;
-use rustc::util::common::{ErrorReported, time};
+use rustc::util::common::{ErrorReported, time, install_panic_hook};
 use rustc_allocator as allocator;
 use rustc_borrowck as borrowck;
 use rustc_incremental;
@@ -36,7 +36,7 @@ use rustc_typeck as typeck;
 use rustc_privacy;
 use rustc_plugin::registry::Registry;
 use rustc_plugin as plugin;
-use rustc_passes::{self, ast_validation, loops, consts, static_recursion, hir_stats};
+use rustc_passes::{self, ast_validation, loops, consts, hir_stats};
 use rustc_const_eval::{self, check_match};
 use super::Compilation;
 
@@ -49,7 +49,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::iter;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use rustc_data_structures::sync::Lrc;
 use std::sync::mpsc;
 use syntax::{self, ast, attr, diagnostics, visit};
 use syntax::ext::base::ExtCtxt;
@@ -123,6 +123,8 @@ pub fn compile_input(trans: Box<TransCrate>,
         let outputs = build_output_filenames(input, outdir, output, &krate.attrs, sess);
         let crate_name =
             ::rustc_trans_utils::link::find_crate_name(Some(sess), &krate.attrs, input);
+        install_panic_hook();
+
         let ExpansionResult { expanded_crate, defs, analysis, resolutions, mut hir_forest } = {
             phase_2_configure_and_expand(
                 sess,
@@ -619,7 +621,7 @@ pub fn phase_2_configure_and_expand<F>(sess: &Session,
                 },
 
                 analysis: ty::CrateAnalysis {
-                    access_levels: Rc::new(AccessLevels::default()),
+                    access_levels: Lrc::new(AccessLevels::default()),
                     name: crate_name.to_string(),
                     glob_map: if resolver.make_glob_map { Some(resolver.glob_map) } else { None },
                 },
@@ -648,7 +650,7 @@ pub fn phase_2_configure_and_expand_inner<'a, F>(sess: &'a Session,
 
     let (mut krate, features) = syntax::config::features(krate, &sess.parse_sess, sess.opts.test);
     // these need to be set "early" so that expansion sees `quote` if enabled.
-    *sess.features.borrow_mut() = features;
+    sess.init_features(features);
 
     *sess.crate_types.borrow_mut() = collect_crate_types(sess, &krate.attrs);
 
@@ -697,7 +699,7 @@ pub fn phase_2_configure_and_expand_inner<'a, F>(sess: &'a Session,
     let mut registry = registry.unwrap_or(Registry::new(sess, krate.span));
 
     time(time_passes, "plugin registration", || {
-        if sess.features.borrow().rustc_diagnostic_macros {
+        if sess.features_untracked().rustc_diagnostic_macros {
             registry.register_macro("__diagnostic_used",
                                     diagnostics::plugin::expand_diagnostic_used);
             registry.register_macro("__register_diagnostic",
@@ -735,7 +737,7 @@ pub fn phase_2_configure_and_expand_inner<'a, F>(sess: &'a Session,
 
     // Lint plugins are registered; now we can process command line flags.
     if sess.opts.describe_lints {
-        super::describe_lints(&sess.lint_store.borrow(), true);
+        super::describe_lints(&sess, &sess.lint_store.borrow(), true);
         return Err(CompileIncomplete::Stopped);
     }
 
@@ -747,7 +749,7 @@ pub fn phase_2_configure_and_expand_inner<'a, F>(sess: &'a Session,
                                      crate_loader,
                                      &resolver_arenas);
     resolver.whitelisted_legacy_custom_derives = whitelisted_legacy_custom_derives;
-    syntax_ext::register_builtins(&mut resolver, syntax_exts, sess.features.borrow().quote);
+    syntax_ext::register_builtins(&mut resolver, syntax_exts, sess.features_untracked().quote);
 
     krate = time(time_passes, "expansion", || {
         // Windows dlls do not have rpaths, so they don't know how to find their
@@ -778,7 +780,7 @@ pub fn phase_2_configure_and_expand_inner<'a, F>(sess: &'a Session,
                                          .filter(|p| env::join_paths(iter::once(p)).is_ok()))
                      .unwrap());
         }
-        let features = sess.features.borrow();
+        let features = sess.features_untracked();
         let cfg = syntax::ext::expand::ExpansionConfig {
             features: Some(&features),
             recursion_limit: sess.recursion_limit.get(),
@@ -816,7 +818,8 @@ pub fn phase_2_configure_and_expand_inner<'a, F>(sess: &'a Session,
                                          &mut resolver,
                                          sess.opts.test,
                                          krate,
-                                         sess.diagnostic())
+                                         sess.diagnostic(),
+                                         &sess.features_untracked())
     });
 
     // If we're actually rustdoc then there's no need to actually compile
@@ -883,7 +886,7 @@ pub fn phase_2_configure_and_expand_inner<'a, F>(sess: &'a Session,
         sess.track_errors(|| {
             syntax::feature_gate::check_crate(&krate,
                                               &sess.parse_sess,
-                                              &sess.features.borrow(),
+                                              &sess.features_untracked(),
                                               &attributes,
                                               sess.opts.unstable_features);
         })
@@ -929,6 +932,7 @@ pub fn phase_2_configure_and_expand_inner<'a, F>(sess: &'a Session,
 }
 
 pub fn default_provide(providers: &mut ty::maps::Providers) {
+    hir::provide(providers);
     borrowck::provide(providers);
     mir::provide(providers);
     reachable::provide(providers);
@@ -987,10 +991,6 @@ pub fn phase_3_run_analysis_passes<'tcx, F, R>(trans: &TransCrate,
     time(time_passes,
          "loop checking",
          || loops::check_crate(sess, &hir_map));
-
-    time(time_passes,
-              "static item recursion checking",
-              || static_recursion::check_crate(sess, &hir_map))?;
 
     let mut local_providers = ty::maps::Providers::default();
     default_provide(&mut local_providers);

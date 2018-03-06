@@ -737,6 +737,7 @@ impl EarlyLintPass for IllegalFloatLiteralPattern {
                 PatKind::TupleStruct(..) |
                 PatKind::Ref(..) |
                 PatKind::Box(..) |
+                PatKind::Paren(..) |
                 PatKind::Slice(..) => (),
 
                 // Extract the expressions and check them
@@ -1355,7 +1356,7 @@ impl UnreachablePub {
             // visibility is token at start of declaration (can be macro
             // variable rather than literal `pub`)
             let pub_span = cx.tcx.sess.codemap().span_until_char(def_span, ' ');
-            let replacement = if cx.tcx.sess.features.borrow().crate_visibility_modifier {
+            let replacement = if cx.tcx.features().crate_visibility_modifier {
                 "crate"
             } else {
                 "pub(crate)"

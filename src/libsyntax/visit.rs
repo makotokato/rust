@@ -425,7 +425,8 @@ pub fn walk_pat<'a, V: Visitor<'a>>(visitor: &mut V, pattern: &'a Pat) {
             walk_list!(visitor, visit_pat, tuple_elements);
         }
         PatKind::Box(ref subpattern) |
-        PatKind::Ref(ref subpattern, _) => {
+        PatKind::Ref(ref subpattern, _) |
+        PatKind::Paren(ref subpattern) => {
             visitor.visit_pat(subpattern)
         }
         PatKind::Ident(_, ref pth1, ref optional_subpattern) => {
@@ -705,15 +706,15 @@ pub fn walk_expr<'a, V: Visitor<'a>>(visitor: &mut V, expression: &'a Expr) {
             visitor.visit_expr(subexpression);
             visitor.visit_block(block);
         }
-        ExprKind::IfLet(ref pattern, ref subexpression, ref if_block, ref optional_else) => {
-            visitor.visit_pat(pattern);
+        ExprKind::IfLet(ref pats, ref subexpression, ref if_block, ref optional_else) => {
+            walk_list!(visitor, visit_pat, pats);
             visitor.visit_expr(subexpression);
             visitor.visit_block(if_block);
             walk_list!(visitor, visit_expr, optional_else);
         }
-        ExprKind::WhileLet(ref pattern, ref subexpression, ref block, ref opt_label) => {
+        ExprKind::WhileLet(ref pats, ref subexpression, ref block, ref opt_label) => {
             walk_list!(visitor, visit_label, opt_label);
-            visitor.visit_pat(pattern);
+            walk_list!(visitor, visit_pat, pats);
             visitor.visit_expr(subexpression);
             visitor.visit_block(block);
         }
@@ -811,7 +812,7 @@ pub fn walk_arm<'a, V: Visitor<'a>>(visitor: &mut V, arm: &'a Arm) {
 }
 
 pub fn walk_vis<'a, V: Visitor<'a>>(visitor: &mut V, vis: &'a Visibility) {
-    if let Visibility::Restricted { ref path, id } = *vis {
+    if let VisibilityKind::Restricted { ref path, id } = vis.node {
         visitor.visit_path(path, id);
     }
 }

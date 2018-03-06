@@ -39,12 +39,11 @@ use util::nodemap::{NodeSet, DefIdMap, FxHashMap, FxHashSet};
 use serialize::{self, Encodable, Encoder};
 use std::cell::RefCell;
 use std::cmp;
-use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
 use std::ops::Deref;
-use std::rc::Rc;
+use rustc_data_structures::sync::Lrc;
 use std::slice;
 use std::vec::IntoIter;
 use std::mem;
@@ -70,7 +69,7 @@ pub use self::sty::{ExistentialTraitRef, PolyExistentialTraitRef};
 pub use self::sty::{ExistentialProjection, PolyExistentialProjection, Const};
 pub use self::sty::{BoundRegion, EarlyBoundRegion, FreeRegion, Region};
 pub use self::sty::RegionKind;
-pub use self::sty::{TyVid, IntVid, FloatVid, RegionVid, SkolemizedRegionVid};
+pub use self::sty::{TyVid, IntVid, FloatVid, RegionVid};
 pub use self::sty::BoundRegion::*;
 pub use self::sty::InferTy::*;
 pub use self::sty::RegionKind::*;
@@ -126,7 +125,7 @@ mod sty;
 /// *on-demand* infrastructure.
 #[derive(Clone)]
 pub struct CrateAnalysis {
-    pub access_levels: Rc<AccessLevels>,
+    pub access_levels: Lrc<AccessLevels>,
     pub name: String,
     pub glob_map: Option<hir::GlobMap>,
 }
@@ -338,10 +337,10 @@ pub struct CrateVariancesMap {
     /// For each item with generics, maps to a vector of the variance
     /// of its generics.  If an item has no generics, it will have no
     /// entry.
-    pub variances: FxHashMap<DefId, Rc<Vec<ty::Variance>>>,
+    pub variances: FxHashMap<DefId, Lrc<Vec<ty::Variance>>>,
 
     /// An empty vector, useful for cloning.
-    pub empty_variance: Rc<Vec<ty::Variance>>,
+    pub empty_variance: Lrc<Vec<ty::Variance>>,
 }
 
 impl Variance {
@@ -498,20 +497,6 @@ impl<'tcx> Hash for TyS<'tcx> {
     }
 }
 
-impl<'tcx> Ord for TyS<'tcx> {
-    #[inline]
-    fn cmp(&self, other: &TyS<'tcx>) -> Ordering {
-        // (self as *const _).cmp(other as *const _)
-        (self as *const TyS<'tcx>).cmp(&(other as *const TyS<'tcx>))
-    }
-}
-impl<'tcx> PartialOrd for TyS<'tcx> {
-    #[inline]
-    fn partial_cmp(&self, other: &TyS<'tcx>) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 impl<'tcx> TyS<'tcx> {
     pub fn is_primitive_ty(&self) -> bool {
         match self.sty {
@@ -580,19 +565,6 @@ impl<T> PartialEq for Slice<T> {
     }
 }
 impl<T> Eq for Slice<T> {}
-
-impl<T> Ord for Slice<T> {
-    #[inline]
-    fn cmp(&self, other: &Slice<T>) -> Ordering {
-        (&self.0 as *const [T]).cmp(&(&other.0 as *const [T]))
-    }
-}
-impl<T> PartialOrd for Slice<T> {
-    #[inline]
-    fn partial_cmp(&self, other: &Slice<T>) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
 
 impl<T> Hash for Slice<T> {
     fn hash<H: Hasher>(&self, s: &mut H) {
@@ -713,11 +685,14 @@ pub struct ClosureUpvar<'tcx> {
     pub ty: Ty<'tcx>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum IntVarValue {
     IntType(ast::IntTy),
     UintType(ast::UintTy),
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct FloatVarValue(pub ast::FloatTy);
 
 #[derive(Copy, Clone, RustcEncodable, RustcDecodable)]
 pub struct TypeParameterDef {
@@ -1128,7 +1103,7 @@ pub type PolySubtypePredicate<'tcx> = ty::Binder<SubtypePredicate<'tcx>>;
 /// equality between arbitrary types. Processing an instance of
 /// Form #2 eventually yields one of these `ProjectionPredicate`
 /// instances to normalize the LHS.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, RustcEncodable, RustcDecodable)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, RustcEncodable, RustcDecodable)]
 pub struct ProjectionPredicate<'tcx> {
     pub projection_ty: ProjectionTy<'tcx>,
     pub ty: Ty<'tcx>,
@@ -1334,6 +1309,85 @@ impl<'tcx> InstantiatedPredicates<'tcx> {
     }
 }
 
+/// "Universes" are used during type- and trait-checking in the
+/// presence of `for<..>` binders to control what sets of names are
+/// visible. Universes are arranged into a tree: the root universe
+/// contains names that are always visible. But when you enter into
+/// some subuniverse, then it may add names that are only visible
+/// within that subtree (but it can still name the names of its
+/// ancestor universes).
+///
+/// To make this more concrete, consider this program:
+///
+/// ```
+/// struct Foo { }
+/// fn bar<T>(x: T) {
+///   let y: for<'a> fn(&'a u8, Foo) = ...;
+/// }
+/// ```
+///
+/// The struct name `Foo` is in the root universe U0. But the type
+/// parameter `T`, introduced on `bar`, is in a subuniverse U1 --
+/// i.e., within `bar`, we can name both `T` and `Foo`, but outside of
+/// `bar`, we cannot name `T`. Then, within the type of `y`, the
+/// region `'a` is in a subuniverse U2 of U1, because we can name it
+/// inside the fn type but not outside.
+///
+/// Universes are related to **skolemization** -- which is a way of
+/// doing type- and trait-checking around these "forall" binders (also
+/// called **universal quantification**). The idea is that when, in
+/// the body of `bar`, we refer to `T` as a type, we aren't referring
+/// to any type in particular, but rather a kind of "fresh" type that
+/// is distinct from all other types we have actually declared. This
+/// is called a **skolemized** type, and we use universes to talk
+/// about this. In other words, a type name in universe 0 always
+/// corresponds to some "ground" type that the user declared, but a
+/// type name in a non-zero universe is a skolemized type -- an
+/// idealized representative of "types in general" that we use for
+/// checking generic functions.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, RustcEncodable, RustcDecodable)]
+pub struct UniverseIndex(u32);
+
+impl UniverseIndex {
+    /// The root universe, where things that the user defined are
+    /// visible.
+    pub const ROOT: UniverseIndex = UniverseIndex(0);
+
+    /// A "subuniverse" corresponds to being inside a `forall` quantifier.
+    /// So, for example, suppose we have this type in universe `U`:
+    ///
+    /// ```
+    /// for<'a> fn(&'a u32)
+    /// ```
+    ///
+    /// Once we "enter" into this `for<'a>` quantifier, we are in a
+    /// subuniverse of `U` -- in this new universe, we can name the
+    /// region `'a`, but that region was not nameable from `U` because
+    /// it was not in scope there.
+    pub fn subuniverse(self) -> UniverseIndex {
+        UniverseIndex(self.0.checked_add(1).unwrap())
+    }
+
+    pub fn from(v: u32) -> UniverseIndex {
+        UniverseIndex(v)
+    }
+
+    pub fn as_u32(&self) -> u32 {
+        self.0
+    }
+
+    pub fn as_usize(&self) -> usize {
+        self.0 as usize
+    }
+
+    /// Gets the "depth" of this universe in the universe tree. This
+    /// is not really useful except for e.g. the `HashStable`
+    /// implementation
+    pub fn depth(&self) -> u32 {
+        self.0
+    }
+}
+
 /// When type checking, we use the `ParamEnv` to track
 /// details about the set of where-clauses that are in scope at this
 /// particular point.
@@ -1348,6 +1402,17 @@ pub struct ParamEnv<'tcx> {
     /// want `Reveal::All` -- note that this is always paired with an
     /// empty environment. To get that, use `ParamEnv::reveal()`.
     pub reveal: traits::Reveal,
+
+    /// What is the innermost universe we have created? Starts out as
+    /// `UniverseIndex::root()` but grows from there as we enter
+    /// universal quantifiers.
+    ///
+    /// NB: At present, we exclude the universal quantifiers on the
+    /// item we are type-checking, and just consider those names as
+    /// part of the root universe. So this would only get incremented
+    /// when we enter into a higher-ranked (`for<..>`) type or trait
+    /// bound.
+    pub universe: UniverseIndex,
 }
 
 impl<'tcx> ParamEnv<'tcx> {
@@ -1532,7 +1597,7 @@ impl<'gcx> HashStable<StableHashingContext<'gcx>> for AdtDef {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum AdtKind { Struct, Union, Enum }
 
 bitflags! {
@@ -2133,7 +2198,7 @@ impl BorrowKind {
 
 #[derive(Debug, Clone)]
 pub enum Attributes<'gcx> {
-    Owned(Rc<[ast::Attribute]>),
+    Owned(Lrc<[ast::Attribute]>),
     Borrowed(&'gcx [ast::Attribute])
 }
 
@@ -2270,7 +2335,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     /// Returns true if the impls are the same polarity and are implementing
     /// a trait which contains no items
     pub fn impls_are_allowed_to_overlap(self, def_id1: DefId, def_id2: DefId) -> bool {
-        if !self.sess.features.borrow().overlapping_marker_traits {
+        if !self.features().overlapping_marker_traits {
             return false;
         }
         let trait1_is_empty = self.impl_trait_ref(def_id1)
@@ -2562,7 +2627,7 @@ fn adt_dtorck_constraint<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
 fn associated_item_def_ids<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                      def_id: DefId)
-                                     -> Rc<Vec<DefId>> {
+                                     -> Lrc<Vec<DefId>> {
     let id = tcx.hir.as_local_node_id(def_id).unwrap();
     let item = tcx.hir.expect_item(id);
     let vec: Vec<_> = match item.node {
@@ -2581,7 +2646,7 @@ fn associated_item_def_ids<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         hir::ItemTraitAlias(..) => vec![],
         _ => span_bug!(item.span, "associated_item_def_ids: not impl or trait")
     };
-    Rc::new(vec)
+    Lrc::new(vec)
 }
 
 fn def_span<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> Span {
@@ -2623,7 +2688,8 @@ fn param_env<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     // sure that this will succeed without errors anyway.
 
     let unnormalized_env = ty::ParamEnv::new(tcx.intern_predicates(&predicates),
-                                             traits::Reveal::UserFacing);
+                                             traits::Reveal::UserFacing,
+                                             ty::UniverseIndex::ROOT);
 
     let body_id = tcx.hir.as_local_node_id(def_id).map_or(DUMMY_NODE_ID, |id| {
         tcx.hir.maybe_body_owned_by(id).map_or(id, |body| body.node_id)
@@ -2694,7 +2760,7 @@ pub fn provide(providers: &mut ty::maps::Providers) {
 /// (constructing this map requires touching the entire crate).
 #[derive(Clone, Debug)]
 pub struct CrateInherentImpls {
-    pub inherent_impls: DefIdMap<Rc<Vec<DefId>>>,
+    pub inherent_impls: DefIdMap<Lrc<Vec<DefId>>>,
 }
 
 /// A set of constraints that need to be satisfied in order for

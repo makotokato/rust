@@ -31,13 +31,14 @@
 pub use self::Level::*;
 pub use self::LintSource::*;
 
-use std::rc::Rc;
+use rustc_data_structures::sync::Lrc;
 
 use errors::{DiagnosticBuilder, DiagnosticId};
 use hir::def_id::{CrateNum, LOCAL_CRATE};
 use hir::intravisit::{self, FnKind};
 use hir;
-use session::{Session, DiagnosticMessageId};
+use lint::builtin::BuiltinLintDiagnostics;
+use session::{config, Session, DiagnosticMessageId};
 use std::hash;
 use syntax::ast;
 use syntax::codemap::MultiSpan;
@@ -74,6 +75,9 @@ pub struct Lint {
     ///
     /// e.g. "imports that are never used"
     pub desc: &'static str,
+
+    /// Deny lint after this epoch
+    pub epoch_deny: Option<config::Epoch>,
 }
 
 impl Lint {
@@ -81,18 +85,36 @@ impl Lint {
     pub fn name_lower(&self) -> String {
         self.name.to_ascii_lowercase()
     }
+
+    pub fn default_level(&self, session: &Session) -> Level {
+        if let Some(epoch_deny) = self.epoch_deny {
+            if session.epoch() >= epoch_deny {
+                return Level::Deny
+            }
+        }
+        self.default_level
+    }
 }
 
 /// Declare a static item of type `&'static Lint`.
 #[macro_export]
 macro_rules! declare_lint {
+    ($vis: vis $NAME: ident, $Level: ident, $desc: expr, $epoch: expr) => (
+        $vis static $NAME: &$crate::lint::Lint = &$crate::lint::Lint {
+            name: stringify!($NAME),
+            default_level: $crate::lint::$Level,
+            desc: $desc,
+            epoch_deny: Some($epoch)
+        };
+    );
     ($vis: vis $NAME: ident, $Level: ident, $desc: expr) => (
         $vis static $NAME: &$crate::lint::Lint = &$crate::lint::Lint {
             name: stringify!($NAME),
             default_level: $crate::lint::$Level,
-            desc: $desc
+            desc: $desc,
+            epoch_deny: None,
         };
-    )
+    );
 }
 
 /// Declare a static `LintArray` and return it as an expression.
@@ -258,8 +280,8 @@ pub trait EarlyLintPass: LintPass {
 }
 
 /// A lint pass boxed up as a trait object.
-pub type EarlyLintPassObject = Box<EarlyLintPass + 'static>;
-pub type LateLintPassObject = Box<for<'a, 'tcx> LateLintPass<'a, 'tcx> + 'static>;
+pub type EarlyLintPassObject = Box<dyn EarlyLintPass + 'static>;
+pub type LateLintPassObject = Box<dyn for<'a, 'tcx> LateLintPass<'a, 'tcx> + 'static>;
 
 /// Identifies a lint known to the compiler.
 #[derive(Clone, Copy, Debug)]
@@ -304,7 +326,7 @@ impl LintId {
 /// Setting for how to handle a lint.
 #[derive(Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Debug, Hash)]
 pub enum Level {
-    Allow, Warn, Deny, Forbid
+    Allow, Warn, Deny, Forbid,
 }
 
 impl_stable_hash_for!(enum self::Level {
@@ -378,12 +400,14 @@ impl LintBuffer {
                     lint: &'static Lint,
                     id: ast::NodeId,
                     sp: MultiSpan,
-                    msg: &str) {
+                    msg: &str,
+                    diagnostic: BuiltinLintDiagnostics) {
         let early_lint = BufferedEarlyLint {
             lint_id: LintId::of(lint),
             ast_id: id,
             span: sp,
             msg: msg.to_string(),
+            diagnostic
         };
         let arr = self.map.entry(id).or_insert(Vec::new());
         if !arr.contains(&early_lint) {
@@ -481,7 +505,7 @@ pub fn struct_lint_level<'a>(sess: &'a Session,
 }
 
 fn lint_levels<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, cnum: CrateNum)
-    -> Rc<LintLevelMap>
+    -> Lrc<LintLevelMap>
 {
     assert_eq!(cnum, LOCAL_CRATE);
     let mut builder = LintLevelMapBuilder {
@@ -494,7 +518,7 @@ fn lint_levels<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, cnum: CrateNum)
         intravisit::walk_crate(builder, krate);
     });
 
-    Rc::new(builder.levels.build_map())
+    Lrc::new(builder.levels.build_map())
 }
 
 struct LintLevelMapBuilder<'a, 'tcx: 'a> {
