@@ -36,6 +36,7 @@ use util::nodemap::{DefIdMap, FxHashMap};
 ///   parents of a given specializing impl, which is needed for extracting
 ///   default items amongst other things. In the simple "chain" rule, every impl
 ///   has at most one parent.
+#[derive(RustcEncodable, RustcDecodable)]
 pub struct Graph {
     // all impls have a parent; the "root" impls have as their parent the def_id
     // of the trait
@@ -47,6 +48,7 @@ pub struct Graph {
 
 /// Children of a given impl, grouped into blanket/non-blanket varieties as is
 /// done in `TraitDef`.
+#[derive(RustcEncodable, RustcDecodable)]
 struct Children {
     // Impls of a trait (or specializations of a given impl). To allow for
     // quicker lookup, the impls are indexed by a simplified version of their
@@ -391,9 +393,9 @@ pub fn ancestors(tcx: TyCtxt,
     }
 }
 
-impl<'gcx> HashStable<StableHashingContext<'gcx>> for Children {
+impl<'a> HashStable<StableHashingContext<'a>> for Children {
     fn hash_stable<W: StableHasherResult>(&self,
-                                          hcx: &mut StableHashingContext<'gcx>,
+                                          hcx: &mut StableHashingContext<'a>,
                                           hasher: &mut StableHasher<W>) {
         let Children {
             ref nonblanket_impls,

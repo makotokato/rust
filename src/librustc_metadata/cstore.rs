@@ -22,9 +22,7 @@ use rustc_back::PanicStrategy;
 use rustc_data_structures::indexed_vec::IndexVec;
 use rustc::util::nodemap::{FxHashMap, FxHashSet, NodeMap};
 
-use std::cell::{RefCell, Cell};
-use rustc_data_structures::sync::Lrc;
-use rustc_data_structures::owning_ref::ErasedBoxRef;
+use rustc_data_structures::sync::{Lrc, RwLock, Lock};
 use syntax::{ast, attr};
 use syntax::ext::base::SyntaxExtension;
 use syntax::symbol::Symbol;
@@ -42,7 +40,9 @@ pub use cstore_impl::{provide, provide_extern};
 // own crate numbers.
 pub type CrateNumMap = IndexVec<CrateNum, CrateNum>;
 
-pub struct MetadataBlob(pub ErasedBoxRef<[u8]>);
+pub use rustc_data_structures::sync::MetadataRef;
+
+pub struct MetadataBlob(pub MetadataRef);
 
 /// Holds information about a syntax_pos::FileMap imported from another crate.
 /// See `imported_filemaps()` for more information.
@@ -61,13 +61,13 @@ pub struct CrateMetadata {
     /// Information about the extern crate that caused this crate to
     /// be loaded. If this is `None`, then the crate was injected
     /// (e.g., by the allocator)
-    pub extern_crate: Cell<Option<ExternCrate>>,
+    pub extern_crate: Lock<Option<ExternCrate>>,
 
     pub blob: MetadataBlob,
-    pub cnum_map: RefCell<CrateNumMap>,
+    pub cnum_map: Lock<CrateNumMap>,
     pub cnum: CrateNum,
-    pub codemap_import_info: RefCell<Vec<ImportedFileMap>>,
-    pub attribute_cache: RefCell<[Vec<Option<Lrc<[ast::Attribute]>>>; 2]>,
+    pub codemap_import_info: RwLock<Vec<ImportedFileMap>>,
+    pub attribute_cache: Lock<[Vec<Option<Lrc<[ast::Attribute]>>>; 2]>,
 
     pub root: schema::CrateRoot,
 
@@ -78,11 +78,9 @@ pub struct CrateMetadata {
     /// compilation support.
     pub def_path_table: Lrc<DefPathTable>,
 
-    pub exported_symbols: FxHashSet<DefIndex>,
-
     pub trait_impls: FxHashMap<(u32, DefIndex), schema::LazySeq<DefIndex>>,
 
-    pub dep_kind: Cell<DepKind>,
+    pub dep_kind: Lock<DepKind>,
     pub source: CrateSource,
 
     pub proc_macros: Option<Vec<(ast::Name, Lrc<SyntaxExtension>)>>,
@@ -91,21 +89,23 @@ pub struct CrateMetadata {
 }
 
 pub struct CStore {
-    metas: RefCell<IndexVec<CrateNum, Option<Lrc<CrateMetadata>>>>,
+    metas: RwLock<IndexVec<CrateNum, Option<Lrc<CrateMetadata>>>>,
     /// Map from NodeId's of local extern crate statements to crate numbers
-    extern_mod_crate_map: RefCell<NodeMap<CrateNum>>,
-    pub metadata_loader: Box<MetadataLoader>,
+    extern_mod_crate_map: Lock<NodeMap<CrateNum>>,
+    pub metadata_loader: Box<MetadataLoader + Sync>,
 }
 
 impl CStore {
-    pub fn new(metadata_loader: Box<MetadataLoader>) -> CStore {
+    pub fn new(metadata_loader: Box<MetadataLoader + Sync>) -> CStore {
         CStore {
-            metas: RefCell::new(IndexVec::new()),
-            extern_mod_crate_map: RefCell::new(FxHashMap()),
+            metas: RwLock::new(IndexVec::new()),
+            extern_mod_crate_map: Lock::new(FxHashMap()),
             metadata_loader,
         }
     }
 
+    /// You cannot use this function to allocate a CrateNum in a thread-safe manner.
+    /// It is currently only used in CrateLoader which is single-threaded code.
     pub fn next_crate_num(&self) -> CrateNum {
         CrateNum::new(self.metas.borrow().len() + 1)
     }

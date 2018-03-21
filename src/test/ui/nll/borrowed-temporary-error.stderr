@@ -1,5 +1,5 @@
 error[E0597]: borrowed value does not live long enough
-  --> $DIR/borrowed-temporary-error.rs:22:10
+  --> $DIR/borrowed-temporary-error.rs:20:10
    |
 LL |         &(v,)
    |          ^^^^ temporary value does not live long enough
@@ -11,4 +11,4 @@ LL |     println!("{:?}", x);
 
 error: aborting due to previous error
 
-If you want more information on this error, try using "rustc --explain E0597"
+For more information about this error, try `rustc --explain E0597`.

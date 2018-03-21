@@ -138,9 +138,9 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                 self.explain_span(scope_decorated_tag, span)
             }
 
-            ty::ReEarlyBound(_) | ty::ReFree(_) => self.msg_span_from_free_region(region),
-
-            ty::ReStatic => ("the static lifetime".to_owned(), None),
+            ty::ReEarlyBound(_) | ty::ReFree(_) | ty::ReStatic => {
+                self.msg_span_from_free_region(region)
+            }
 
             ty::ReEmpty => ("the empty lifetime".to_owned(), None),
 
@@ -154,6 +154,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             }
 
             // We shouldn't encounter an error message with ReClosureBound.
+            ty::ReCanonical(..) |
             ty::ReClosureBound(..) => {
                 bug!("encountered unexpected ReClosureBound: {:?}", region,);
             }
@@ -175,6 +176,19 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     }
 
     fn msg_span_from_free_region(self, region: ty::Region<'tcx>) -> (String, Option<Span>) {
+        match *region {
+            ty::ReEarlyBound(_) | ty::ReFree(_)  => {
+                self.msg_span_from_early_bound_and_free_regions(region)
+            },
+            ty::ReStatic => ("the static lifetime".to_owned(), None),
+            _ => bug!(),
+        }
+    }
+
+    fn msg_span_from_early_bound_and_free_regions(
+        self,
+        region: ty::Region<'tcx>,
+    ) -> (String, Option<Span>) {
         let scope = region.free_region_binding_scope(self);
         let node = self.hir.as_local_node_id(scope).unwrap_or(DUMMY_NODE_ID);
         let unknown;
@@ -962,6 +976,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
     ) -> Option<(DiagnosticStyledString, DiagnosticStyledString)> {
         match *values {
             infer::Types(ref exp_found) => self.expected_found_str_ty(exp_found),
+            infer::Regions(ref exp_found) => self.expected_found_str(exp_found),
             infer::TraitRefs(ref exp_found) => self.expected_found_str(exp_found),
             infer::PolyTraitRefs(ref exp_found) => self.expected_found_str(exp_found),
         }
@@ -1280,7 +1295,6 @@ impl<'tcx> ObligationCause<'tcx> {
             }),
             IfExpression => Error0308("if and else have incompatible types"),
             IfExpressionWithNoElse => Error0317("if may be missing an else clause"),
-            EquatePredicate => Error0308("equality predicate not satisfied"),
             MainFunctionType => Error0580("main function has wrong type"),
             StartFunctionType => Error0308("start function has wrong type"),
             IntrinsicType => Error0308("intrinsic has wrong type"),
@@ -1309,7 +1323,6 @@ impl<'tcx> ObligationCause<'tcx> {
             },
             IfExpression => "if and else have compatible types",
             IfExpressionWithNoElse => "if missing an else returns ()",
-            EquatePredicate => "equality where clause is satisfied",
             MainFunctionType => "`main` function has the correct type",
             StartFunctionType => "`start` function has the correct type",
             IntrinsicType => "intrinsic has the correct type",

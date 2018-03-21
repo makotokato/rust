@@ -11,8 +11,10 @@
 //! This file builds up the `ScopeTree`, which describes
 //! the parent links in the region hierarchy.
 //!
-//! Most of the documentation on regions can be found in
-//! `middle/infer/region_constraints/README.md`
+//! For more information about how MIR-based region-checking works,
+//! see the [rustc guide].
+//!
+//! [rustc guide]: https://rust-lang-nursery.github.io/rustc-guide/mir-borrowck.html
 
 use ich::{StableHashingContext, NodeIdHashingMode};
 use util::nodemap::{FxHashMap, FxHashSet};
@@ -1488,9 +1490,9 @@ pub fn provide(providers: &mut Providers) {
     };
 }
 
-impl<'gcx> HashStable<StableHashingContext<'gcx>> for ScopeTree {
+impl<'a> HashStable<StableHashingContext<'a>> for ScopeTree {
     fn hash_stable<W: StableHasherResult>(&self,
-                                          hcx: &mut StableHashingContext<'gcx>,
+                                          hcx: &mut StableHashingContext<'a>,
                                           hasher: &mut StableHasher<W>) {
         let ScopeTree {
             root_body,
