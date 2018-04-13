@@ -353,8 +353,8 @@ pub struct ScopeTree {
     /// the result of `g()` occurs after the yield (and therefore
     /// doesn't). If we want to infer that, we can look at the
     /// postorder traversal:
-    /// ```
-    /// `foo` `f` Call#1 `y` Yield `bar` `g` Call#3 Call#2 Call#0
+    /// ```plain,ignore
+    ///     `foo` `f` Call#1 `y` Yield `bar` `g` Call#3 Call#2 Call#0
     /// ```
     ///
     /// In which we can easily see that `Call#1` occurs before the yield,
@@ -1307,7 +1307,6 @@ fn resolve_local<'a, 'tcx>(visitor: &mut RegionResolutionVisitor<'a, 'tcx>,
                 hir::ExprAddrOf(_, ref subexpr) |
                 hir::ExprUnary(hir::UnDeref, ref subexpr) |
                 hir::ExprField(ref subexpr, _) |
-                hir::ExprTupField(ref subexpr, _) |
                 hir::ExprIndex(ref subexpr, _) => {
                     expr = &subexpr;
                 }

@@ -18,12 +18,13 @@ use rustc_data_structures::indexed_vec::Idx;
 use ty::subst::{Substs, Subst, Kind, UnpackedKind};
 use ty::{self, AdtDef, TypeFlags, Ty, TyCtxt, TypeFoldable};
 use ty::{Slice, TyS};
+use util::captures::Captures;
 
 use std::iter;
 use std::cmp::Ordering;
 use syntax::abi;
 use syntax::ast::{self, Name};
-use syntax::symbol::keywords;
+use syntax::symbol::{keywords, InternedString};
 
 use serialize;
 
@@ -384,9 +385,11 @@ impl<'a, 'gcx, 'tcx> ClosureSubsts<'tcx> {
     /// This returns the types of the MIR locals which had to be stored across suspension points.
     /// It is calculated in rustc_mir::transform::generator::StateTransform.
     /// All the types here must be in the tuple in GeneratorInterior.
-    pub fn state_tys(self, def_id: DefId, tcx: TyCtxt<'a, 'gcx, 'tcx>) ->
-        impl Iterator<Item=Ty<'tcx>> + 'a
-    {
+    pub fn state_tys(
+        self,
+        def_id: DefId,
+        tcx: TyCtxt<'a, 'gcx, 'tcx>,
+    ) -> impl Iterator<Item=Ty<'tcx>> + Captures<'gcx> + 'a {
         let state = tcx.generator_layout(def_id).fields.iter();
         state.map(move |d| d.ty.subst(tcx, self.substs))
     }
@@ -403,7 +406,7 @@ impl<'a, 'gcx, 'tcx> ClosureSubsts<'tcx> {
     /// This is the types of all the fields stored in a generator.
     /// It includes the upvars, state types and the state discriminant which is u32.
     pub fn field_tys(self, def_id: DefId, tcx: TyCtxt<'a, 'gcx, 'tcx>) ->
-        impl Iterator<Item=Ty<'tcx>> + 'a
+        impl Iterator<Item=Ty<'tcx>> + Captures<'gcx> + 'a
     {
         self.pre_transforms_tys(def_id, tcx).chain(self.state_tys(def_id, tcx))
     }
@@ -861,16 +864,16 @@ impl<'tcx> PolyFnSig<'tcx> {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, RustcEncodable, RustcDecodable)]
 pub struct ParamTy {
     pub idx: u32,
-    pub name: Name,
+    pub name: InternedString,
 }
 
 impl<'a, 'gcx, 'tcx> ParamTy {
-    pub fn new(index: u32, name: Name) -> ParamTy {
+    pub fn new(index: u32, name: InternedString) -> ParamTy {
         ParamTy { idx: index, name: name }
     }
 
     pub fn for_self() -> ParamTy {
-        ParamTy::new(0, keywords::SelfType.name())
+        ParamTy::new(0, keywords::SelfType.name().as_str())
     }
 
     pub fn for_def(def: &ty::TypeParameterDef) -> ParamTy {
@@ -882,7 +885,7 @@ impl<'a, 'gcx, 'tcx> ParamTy {
     }
 
     pub fn is_self(&self) -> bool {
-        if self.name == keywords::SelfType.name() {
+        if self.name == keywords::SelfType.name().as_str() {
             assert_eq!(self.idx, 0);
             true
         } else {
@@ -1025,7 +1028,7 @@ pub enum RegionKind {
 
     /// A skolemized region - basically the higher-ranked version of ReFree.
     /// Should not exist after typeck.
-    ReSkolemized(ty::UniverseIndex, BoundRegion),
+    ReSkolemized(SkolemizedRegionVid, BoundRegion),
 
     /// Empty lifetime is for data that is never accessed.
     /// Bottom in the region lattice. We treat ReEmpty somewhat
@@ -1078,6 +1081,11 @@ newtype_index!(RegionVid
         pub idx
         DEBUG_FORMAT = custom,
     });
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, RustcEncodable, RustcDecodable, PartialOrd, Ord)]
+pub struct SkolemizedRegionVid {
+    pub index: u32,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, RustcEncodable, RustcDecodable)]
 pub enum InferTy {
@@ -1667,7 +1675,6 @@ impl<'a, 'gcx, 'tcx> TyS<'tcx> {
 pub struct Const<'tcx> {
     pub ty: Ty<'tcx>,
 
-    // FIXME(eddyb) Replace this with a miri value.
     pub val: ConstVal<'tcx>,
 }
 

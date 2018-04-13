@@ -12,7 +12,8 @@ use rustc::hir::{self, ImplPolarity};
 use rustc::hir::def_id::DefId;
 use rustc::hir::intravisit::{self, NestedVisitorMap, Visitor};
 use rustc::ty::{self, TyCtxt};
-use rustc::traits::{QuantifierKind, Goal, DomainGoal, Clause, WhereClauseAtom};
+use rustc::ty::subst::Substs;
+use rustc::traits::{WhereClauseAtom, PolyDomainGoal, DomainGoal, ProgramClause, Clause};
 use syntax::ast;
 use rustc_data_structures::sync::Lrc;
 
@@ -60,28 +61,19 @@ impl<'tcx> Lower<DomainGoal<'tcx>> for ty::TypeOutlivesPredicate<'tcx> {
 /// `ty::Binder` is used for wrapping a rustc construction possibly containing generic
 /// lifetimes, e.g. `for<'a> T: Fn(&'a i32)`. Instead of representing higher-ranked things
 /// in that leaf-form (i.e. `Holds(Implemented(Binder<TraitPredicate>))` in the previous
-/// example), we model them with quantified goals, e.g. as for the previous example:
+/// example), we model them with quantified domain goals, e.g. as for the previous example:
 /// `forall<'a> { T: Fn(&'a i32) }` which corresponds to something like
 /// `Binder<Holds(Implemented(TraitPredicate))>`.
-///
-/// Also, if `self` does not contain generic lifetimes, we can safely drop the binder and we
-/// can directly lower to a leaf goal instead of a quantified goal.
-impl<'tcx, T> Lower<Goal<'tcx>> for ty::Binder<T>
-    where T: Lower<DomainGoal<'tcx>> + ty::fold::TypeFoldable<'tcx> + Copy
+impl<'tcx, T> Lower<PolyDomainGoal<'tcx>> for ty::Binder<T>
+    where T: Lower<DomainGoal<'tcx>> + ty::fold::TypeFoldable<'tcx>
 {
-    fn lower(&self) -> Goal<'tcx> {
-        match self.no_late_bound_regions() {
-            Some(p) => p.lower().into(),
-            None => Goal::Quantified(
-                QuantifierKind::Universal,
-                Box::new(self.map_bound(|p| p.lower().into()))
-            ),
-        }
+    fn lower(&self) -> PolyDomainGoal<'tcx> {
+        self.map_bound_ref(|p| p.lower())
     }
 }
 
-impl<'tcx> Lower<Goal<'tcx>> for ty::Predicate<'tcx> {
-    fn lower(&self) -> Goal<'tcx> {
+impl<'tcx> Lower<PolyDomainGoal<'tcx>> for ty::Predicate<'tcx> {
+    fn lower(&self) -> PolyDomainGoal<'tcx> {
         use rustc::ty::Predicate::*;
 
         match self {
@@ -89,11 +81,33 @@ impl<'tcx> Lower<Goal<'tcx>> for ty::Predicate<'tcx> {
             RegionOutlives(predicate) => predicate.lower(),
             TypeOutlives(predicate) => predicate.lower(),
             Projection(predicate) => predicate.lower(),
-            WellFormed(ty) => DomainGoal::WellFormedTy(*ty).into(),
+            WellFormed(ty) => ty::Binder::dummy(DomainGoal::WellFormedTy(*ty)),
             ObjectSafe(..) |
             ClosureKind(..) |
             Subtype(..) |
             ConstEvaluatable(..) => unimplemented!(),
+        }
+    }
+}
+
+/// Transforms an existing goal into a FromEnv goal.
+///
+/// Used for lowered where clauses (see rustc guide).
+trait IntoFromEnvGoal {
+    fn into_from_env_goal(self) -> Self;
+}
+
+impl<'tcx> IntoFromEnvGoal for DomainGoal<'tcx> {
+    fn into_from_env_goal(self) -> DomainGoal<'tcx> {
+        use self::DomainGoal::*;
+        match self {
+            Holds(wc_atom) => FromEnv(wc_atom),
+            WellFormed(..) |
+            FromEnv(..) |
+            WellFormedTy(..) |
+            FromEnvTy(..) |
+            RegionOutlives(..) |
+            TypeOutlives(..) => self,
         }
     }
 }
@@ -104,11 +118,84 @@ crate fn program_clauses_for<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefI
     let node_id = tcx.hir.as_local_node_id(def_id).unwrap();
     let item = tcx.hir.expect_item(node_id);
     match item.node {
+        hir::ItemTrait(..) => program_clauses_for_trait(tcx, def_id),
         hir::ItemImpl(..) => program_clauses_for_impl(tcx, def_id),
 
         // FIXME: other constructions e.g. traits, associated types...
         _ => Lrc::new(vec![]),
     }
+}
+
+fn program_clauses_for_trait<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId)
+    -> Lrc<Vec<Clause<'tcx>>>
+{
+    // `trait Trait<P1..Pn> where WC { .. } // P0 == Self`
+
+    // Rule Implemented-From-Env (see rustc guide)
+    //
+    // ```
+    // forall<Self, P1..Pn> {
+    //   Implemented(Self: Trait<P1..Pn>) :- FromEnv(Self: Trait<P1..Pn>)
+    // }
+    // ```
+
+    // `Self: Trait<P1..Pn>`
+    let trait_pred = ty::TraitPredicate {
+        trait_ref: ty::TraitRef {
+            def_id,
+            substs: Substs::identity_for_item(tcx, def_id)
+        }
+    };
+    // `FromEnv(Self: Trait<P1..Pn>)`
+    let from_env = DomainGoal::FromEnv(trait_pred.lower()).into();
+    // `Implemented(Self: Trait<P1..Pn>)`
+    let impl_trait = DomainGoal::Holds(WhereClauseAtom::Implemented(trait_pred));
+
+    // `Implemented(Self: Trait<P1..Pn>) :- FromEnv(Self: Trait<P1..Pn>)`
+    let implemented_from_env = ProgramClause {
+        goal: impl_trait,
+        hypotheses: vec![from_env],
+    };
+    let mut clauses = vec![
+        Clause::ForAll(ty::Binder::dummy(implemented_from_env))
+    ];
+
+    // Rule Implied-Bound-From-Trait
+    //
+    // For each where clause WC:
+    // ```
+    // forall<Self, P1..Pn> {
+    //   FromEnv(WC) :- FromEnv(Self: Trait<P1..Pn)
+    // }
+    // ```
+
+    // `FromEnv(WC) :- FromEnv(Self: Trait<P1..Pn>)`, for each where clause WC
+    // FIXME: Remove the [1..] slice; this is a hack because the query
+    // predicates_of currently includes the trait itself (`Self: Trait<P1..Pn>`).
+    let where_clauses = &tcx.predicates_of(def_id).predicates;
+    let implied_bound_clauses =
+        where_clauses[1..].into_iter()
+        .map(|wc| implied_bound_from_trait(trait_pred, wc));
+    clauses.extend(implied_bound_clauses);
+
+    Lrc::new(clauses)
+}
+
+/// For a given `where_clause`, returns a clause `FromEnv(WC) :- FromEnv(Self: Trait<P1..Pn>)`.
+fn implied_bound_from_trait<'tcx>(
+    trait_pred: ty::TraitPredicate<'tcx>,
+    where_clause: &ty::Predicate<'tcx>,
+) -> Clause<'tcx> {
+    // `FromEnv(Self: Trait<P1..Pn>)`
+    let impl_trait = DomainGoal::FromEnv(WhereClauseAtom::Implemented(trait_pred));
+
+    // `FromEnv(WC) :- FromEnv(Self: Trait<P1..Pn>)`
+    Clause::ForAll(
+        where_clause.lower().map_bound(|goal| ProgramClause {
+            goal: goal.into_from_env_goal(),
+            hypotheses: vec![impl_trait.into()],
+        })
+    )
 }
 
 fn program_clauses_for_impl<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId)
@@ -118,16 +205,28 @@ fn program_clauses_for_impl<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId
         return Lrc::new(vec![]);
     }
 
-    // Rule Implemented-From-Impl
+    // Rule Implemented-From-Impl (see rustc guide)
     //
-    // (see rustc guide)
+    // `impl<P0..Pn> Trait<A1..An> for A0 where WC { .. }`
+    //
+    // ```
+    // forall<P0..Pn> {
+    //   Implemented(A0: Trait<A1..An>) :- WC
+    // }
+    // ```
 
     let trait_ref = tcx.impl_trait_ref(def_id).unwrap();
-    let trait_ref = ty::TraitPredicate { trait_ref }.lower();
+    // `Implemented(A0: Trait<A1..An>)`
+    let trait_pred = ty::TraitPredicate { trait_ref }.lower();
+     // `WC`
     let where_clauses = tcx.predicates_of(def_id).predicates.lower();
 
-    let clause = Clause::Implies(where_clauses, trait_ref);
-    Lrc::new(vec![clause])
+     // `Implemented(A0: Trait<A1..An>) :- WC`
+    let clause = ProgramClause {
+        goal: trait_pred,
+        hypotheses: where_clauses.into_iter().map(|wc| wc.into()).collect()
+    };
+    Lrc::new(vec![Clause::ForAll(ty::Binder::dummy(clause))])
 }
 
 pub fn dump_program_clauses<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
@@ -143,14 +242,19 @@ struct ClauseDumper<'a, 'tcx: 'a> {
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
 }
 
-impl <'a, 'tcx> ClauseDumper<'a, 'tcx > {
+impl<'a, 'tcx> ClauseDumper<'a, 'tcx > {
     fn process_attrs(&mut self, node_id: ast::NodeId, attrs: &[ast::Attribute]) {
         let def_id = self.tcx.hir.local_def_id(node_id);
         for attr in attrs {
             if attr.check_name("rustc_dump_program_clauses") {
                 let clauses = self.tcx.program_clauses_for(def_id);
                 for clause in &*clauses {
-                    self.tcx.sess.struct_span_err(attr.span, &format!("{}", clause)).emit();
+                    // Skip the top-level binder for a less verbose output
+                    let program_clause = match clause {
+                        Clause::Implies(program_clause) => program_clause,
+                        Clause::ForAll(program_clause) => program_clause.skip_binder(),
+                    };
+                    self.tcx.sess.struct_span_err(attr.span, &format!("{}", program_clause)).emit();
                 }
             }
         }

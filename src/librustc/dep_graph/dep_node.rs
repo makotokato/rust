@@ -500,6 +500,7 @@ define_dep_nodes!( <'tcx>
     [] GenericsOfItem(DefId),
     [] PredicatesOfItem(DefId),
     [] InferredOutlivesOf(DefId),
+    [] InferredOutlivesCrate(CrateNum),
     [] SuperPredicatesOfItem(DefId),
     [] TraitDefOfItem(DefId),
     [] AdtDefOfItem(DefId),
@@ -561,6 +562,7 @@ define_dep_nodes!( <'tcx>
     [] ImplParent(DefId),
     [] TraitOfItem(DefId),
     [] IsReachableNonGeneric(DefId),
+    [] IsUnreachableLocalDefinition(DefId),
     [] IsMirAvailable(DefId),
     [] ItemAttrs(DefId),
     [] TransFnAttrs(DefId),
@@ -579,6 +581,9 @@ define_dep_nodes!( <'tcx>
     [] GetPanicStrategy(CrateNum),
     [] IsNoBuiltins(CrateNum),
     [] ImplDefaultness(DefId),
+    [] CheckItemWellFormed(DefId),
+    [] CheckTraitItemWellFormed(DefId),
+    [] CheckImplItemWellFormed(DefId),
     [] ReachableNonGenerics(CrateNum),
     [] NativeLibraries(CrateNum),
     [] PluginRegistrarFn(CrateNum),
@@ -586,10 +591,12 @@ define_dep_nodes!( <'tcx>
     [input] CrateDisambiguator(CrateNum),
     [input] CrateHash(CrateNum),
     [input] OriginalCrateName(CrateNum),
+    [input] ExtraFileName(CrateNum),
 
     [] ImplementationsOfTrait { krate: CrateNum, trait_id: DefId },
     [] AllTraitImplementations(CrateNum),
 
+    [] DllimportForeignItems(CrateNum),
     [] IsDllimportForeignItem(DefId),
     [] IsStaticallyIncludedForeignItem(DefId),
     [] NativeLibraryKind(DefId),
@@ -613,8 +620,6 @@ define_dep_nodes!( <'tcx>
     [input] MissingExternCrateItem(CrateNum),
     [input] UsedCrateSource(CrateNum),
     [input] PostorderCnums,
-    [] HasCloneClosures(CrateNum),
-    [] HasCopyClosures(CrateNum),
 
     // This query is not expected to have inputs -- as a result, it's
     // not a good candidate for "replay" because it's essentially a
@@ -628,6 +633,7 @@ define_dep_nodes!( <'tcx>
     [input] MaybeUnusedTraitImport(DefId),
     [input] MaybeUnusedExternCrates,
     [eval_always] StabilityIndex,
+    [eval_always] AllTraits,
     [input] AllCrateNums,
     [] ExportedSymbols(CrateNum),
     [eval_always] CollectAndPartitionTranslationItems,
@@ -645,11 +651,16 @@ define_dep_nodes!( <'tcx>
 
     [] InstanceDefSizeEstimate { instance_def: InstanceDef<'tcx> },
 
-    [] GetSymbolExportLevel(DefId),
+    [] WasmCustomSections(CrateNum),
 
     [input] Features,
 
     [] ProgramClausesFor(DefId),
+    [] WasmImportModuleMap(CrateNum),
+    [] ForeignModules(CrateNum),
+
+    [] UpstreamMonomorphizations(CrateNum),
+    [] UpstreamMonomorphizationsFor(DefId),
 );
 
 trait DepNodeParams<'a, 'gcx: 'tcx + 'a, 'tcx: 'a> : fmt::Debug {

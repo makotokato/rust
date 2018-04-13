@@ -227,10 +227,6 @@
 // Tell the compiler to link to either panic_abort or panic_unwind
 #![needs_panic_runtime]
 
-// Turn warnings into errors, but only after stage0, where it can be useful for
-// code to emit warnings during language transitions
-#![cfg_attr(not(stage0), deny(warnings))]
-
 // std may use features in a platform-specific way
 #![allow(unused_features)]
 
@@ -266,11 +262,9 @@
 #![feature(float_from_str_radix)]
 #![feature(fn_traits)]
 #![feature(fnbox)]
-#![feature(generic_param_attrs)]
+#![cfg_attr(stage0, feature(generic_param_attrs))]
 #![feature(hashmap_internals)]
 #![feature(heap_api)]
-#![feature(i128)]
-#![feature(i128_type)]
 #![feature(int_error_internals)]
 #![feature(integer_atomics)]
 #![feature(into_cow)]
@@ -282,6 +276,7 @@
 #![feature(macro_vis_matcher)]
 #![feature(needs_panic_runtime)]
 #![feature(exhaustive_patterns)]
+#![feature(nonzero)]
 #![feature(num_bits_bytes)]
 #![feature(old_wrapping)]
 #![feature(on_unimplemented)]
@@ -290,7 +285,6 @@
 #![feature(panic_internals)]
 #![feature(panic_unwind)]
 #![feature(peek)]
-#![feature(placement_in_syntax)]
 #![feature(placement_new_protocol)]
 #![feature(prelude_import)]
 #![feature(ptr_internals)]
@@ -298,6 +292,7 @@
 #![feature(raw)]
 #![feature(rustc_attrs)]
 #![feature(stdsimd)]
+#![feature(shrink_to)]
 #![feature(slice_bytes)]
 #![feature(slice_concat_ext)]
 #![feature(slice_internals)]
@@ -307,14 +302,11 @@
 #![feature(str_char)]
 #![feature(str_internals)]
 #![feature(str_utf16)]
-#![feature(termination_trait)]
 #![feature(test, rustc_private)]
 #![feature(thread_local)]
 #![feature(toowned_clone_into)]
-#![feature(try_from)]
 #![feature(try_reserve)]
 #![feature(unboxed_closures)]
-#![feature(unicode)]
 #![feature(untagged_unions)]
 #![feature(unwind_attributes)]
 #![feature(vec_push_all)]
@@ -323,7 +315,6 @@
 #![feature(doc_spotlight)]
 #![cfg_attr(test, feature(update_panic_count))]
 #![cfg_attr(windows, feature(used))]
-#![cfg_attr(stage0, feature(never_type))]
 
 #![default_lib_allocator]
 
@@ -356,14 +347,12 @@ use prelude::v1::*;
 // add a new crate name so we can attach the re-exports to it.
 #[macro_reexport(assert_eq, assert_ne, debug_assert, debug_assert_eq,
                  debug_assert_ne, unreachable, unimplemented, write, writeln, try)]
-#[cfg_attr(stage0, macro_reexport(assert))]
 extern crate core as __core;
 
 #[macro_use]
 #[macro_reexport(vec, format)]
 extern crate alloc;
 extern crate alloc_system;
-extern crate std_unicode;
 #[doc(masked)]
 extern crate libc;
 
@@ -374,12 +363,13 @@ extern crate unwind;
 
 // compiler-rt intrinsics
 #[doc(masked)]
+#[cfg(stage0)]
 extern crate compiler_builtins;
 
 // During testing, this crate is not actually the "real" std library, but rather
 // it links to the real std library, which was compiled from this same source
 // code. So any lang items std defines are conditionally excluded (or else they
-// wolud generate duplicate lang item errors), and any globals it defines are
+// would generate duplicate lang item errors), and any globals it defines are
 // _not_ the globals used by "real" std. So this import, defined only during
 // testing gives test-std access to real-std lang items and globals. See #2912
 #[cfg(test)] extern crate std as realstd;
@@ -434,7 +424,7 @@ pub use core::i16;
 pub use core::i32;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::i64;
-#[unstable(feature = "i128", issue = "35118")]
+#[stable(feature = "i128", since = "1.26.0")]
 pub use core::i128;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::usize;
@@ -463,8 +453,8 @@ pub use alloc::string;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use alloc::vec;
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use std_unicode::char;
-#[unstable(feature = "i128", issue = "35118")]
+pub use core::char;
+#[stable(feature = "i128", since = "1.26.0")]
 pub use core::u128;
 
 pub mod f32;

@@ -10,11 +10,12 @@
 
 // Decoding metadata from a single crate's metadata
 
-use cstore::{self, CrateMetadata, MetadataBlob, NativeLibrary};
+use cstore::{self, CrateMetadata, MetadataBlob, NativeLibrary, ForeignModule};
 use schema::*;
 
 use rustc_data_structures::sync::{Lrc, ReadGuard};
-use rustc::hir::map::{DefKey, DefPath, DefPathData, DefPathHash};
+use rustc::hir::map::{DefKey, DefPath, DefPathData, DefPathHash,
+                      DisambiguatedDefPathData};
 use rustc::hir;
 use rustc::middle::cstore::{LinkagePreference, ExternConstBody,
                             ExternBodyNestedBodies};
@@ -29,6 +30,7 @@ use rustc::session::Session;
 use rustc::ty::{self, Ty, TyCtxt};
 use rustc::ty::codec::TyDecoder;
 use rustc::mir::Mir;
+use rustc::util::captures::Captures;
 use rustc::util::nodemap::FxHashMap;
 
 use std::collections::BTreeMap;
@@ -146,7 +148,10 @@ impl<'a, 'tcx: 'a, T: Decodable> Lazy<T> {
 }
 
 impl<'a, 'tcx: 'a, T: Decodable> LazySeq<T> {
-    pub fn decode<M: Metadata<'a, 'tcx>>(self, meta: M) -> impl Iterator<Item = T> + 'a {
+    pub fn decode<M: Metadata<'a, 'tcx>>(
+        self,
+        meta: M,
+    ) -> impl Iterator<Item = T> + Captures<'tcx> + 'a {
         let mut dcx = meta.decoder(self.position);
         dcx.lazy_state = LazyState::NodeStart(self.position);
         (0..self.len).map(move |_| T::decode(&mut dcx).unwrap())
@@ -813,11 +818,14 @@ impl<'a, 'tcx> CrateMetadata {
         tcx.alloc_tables(ast.tables.decode((self, tcx)))
     }
 
-    pub fn item_body_nested_bodies(&self, id: DefIndex) -> ExternBodyNestedBodies {
+    pub fn item_body_nested_bodies(&self,
+                                   tcx: TyCtxt<'a, 'tcx, 'tcx>,
+                                   id: DefIndex)
+                                   -> ExternBodyNestedBodies {
         if let Some(ref ast) = self.entry(id).ast {
-            let ast = ast.decode(self);
+            let mut ast = ast.decode(self);
             let nested_bodies: BTreeMap<_, _> = ast.nested_bodies
-                                                   .decode(self)
+                                                   .decode((self, tcx.sess))
                                                    .map(|body| (body.id(), body))
                                                    .collect();
             ExternBodyNestedBodies {
@@ -1027,6 +1035,10 @@ impl<'a, 'tcx> CrateMetadata {
         self.root.native_libraries.decode((self, sess)).collect()
     }
 
+    pub fn get_foreign_modules(&self, sess: &Session) -> Vec<ForeignModule> {
+        self.root.foreign_modules.decode((self, sess)).collect()
+    }
+
     pub fn get_dylib_dependency_formats(&self) -> Vec<(CrateNum, LinkagePreference)> {
         self.root
             .dylib_dependency_formats
@@ -1056,11 +1068,23 @@ impl<'a, 'tcx> CrateMetadata {
         arg_names.decode(self).collect()
     }
 
-    pub fn exported_symbols(&self) -> Vec<(ExportedSymbol, SymbolExportLevel)> {
-        self.root
-            .exported_symbols
+    pub fn exported_symbols(&self,
+                            tcx: TyCtxt<'a, 'tcx, 'tcx>)
+                            -> Vec<(ExportedSymbol<'tcx>, SymbolExportLevel)> {
+        let lazy_seq: LazySeq<(ExportedSymbol<'tcx>, SymbolExportLevel)> =
+            LazySeq::with_position_and_length(self.root.exported_symbols.position,
+                                              self.root.exported_symbols.len);
+        lazy_seq.decode((self, tcx)).collect()
+    }
+
+    pub fn wasm_custom_sections(&self) -> Vec<DefId> {
+        let sections = self.root
+            .wasm_custom_sections
             .decode(self)
-            .collect()
+            .map(|def_index| self.local_def_id(def_index))
+            .collect::<Vec<_>>();
+        info!("loaded wasm sections {:?}", sections);
+        return sections
     }
 
     pub fn get_macro(&self, id: DefIndex) -> (InternedString, MacroDef) {
@@ -1089,10 +1113,6 @@ impl<'a, 'tcx> CrateMetadata {
         }
     }
 
-    pub fn is_dllimport_foreign_item(&self, id: DefIndex) -> bool {
-        self.dllimport_foreign_items.contains(&id)
-    }
-
     pub fn fn_sig(&self,
                   id: DefIndex,
                   tcx: TyCtxt<'a, 'tcx, 'tcx>)
@@ -1111,7 +1131,23 @@ impl<'a, 'tcx> CrateMetadata {
 
     #[inline]
     pub fn def_key(&self, index: DefIndex) -> DefKey {
-        self.def_path_table.def_key(index)
+        if !self.is_proc_macro(index) {
+            self.def_path_table.def_key(index)
+        } else {
+            // FIXME(#49271) - It would be better if the DefIds were consistent
+            //                 with the DefPathTable, but for proc-macro crates
+            //                 they aren't.
+            let name = self.proc_macros
+                           .as_ref()
+                           .unwrap()[index.to_proc_macro_index()].0;
+            DefKey {
+                parent: Some(CRATE_DEF_INDEX),
+                disambiguated_data: DisambiguatedDefPathData {
+                    data: DefPathData::MacroDef(name.as_str()),
+                    disambiguator: 0,
+                }
+            }
+        }
     }
 
     // Returns the path leading to the thing with this `id`.

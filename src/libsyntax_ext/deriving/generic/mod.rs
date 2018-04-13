@@ -195,6 +195,7 @@ use syntax::abi::Abi;
 use syntax::ast::{
     self, BinOpKind, EnumDef, Expr, GenericParam, Generics, Ident, PatKind, VariantData
 };
+
 use syntax::attr;
 use syntax::ext::base::{Annotatable, ExtCtxt};
 use syntax::ext::build::AstBuilder;
@@ -367,7 +368,7 @@ fn find_type_parameters(ty: &ast::Ty,
         fn visit_ty(&mut self, ty: &'a ast::Ty) {
             if let ast::TyKind::Path(_, ref path) = ty.node {
                 if let Some(segment) = path.segments.first() {
-                    if self.ty_param_names.contains(&segment.identifier.name) {
+                    if self.ty_param_names.contains(&segment.ident.name) {
                         self.types.push(P(ty.clone()));
                     }
                 }
@@ -412,8 +413,12 @@ impl<'a> TraitDef<'a> {
         match *item {
             Annotatable::Item(ref item) => {
                 let is_packed = item.attrs.iter().any(|attr| {
-                    attr::find_repr_attrs(&cx.parse_sess.span_diagnostic, attr)
-                        .contains(&attr::ReprPacked)
+                    for r in attr::find_repr_attrs(&cx.parse_sess.span_diagnostic, attr) {
+                        if let attr::ReprPacked(_) = r {
+                            return true;
+                        }
+                    }
+                    false
                 });
                 let has_no_type_params = match item.node {
                     ast::ItemKind::Struct(_, ref generics) |
@@ -622,7 +627,7 @@ impl<'a> TraitDef<'a> {
                         // if we have already handled this type, skip it
                         if let ast::TyKind::Path(_, ref p) = ty.node {
                             if p.segments.len() == 1 &&
-                            ty_param_names.contains(&p.segments[0].identifier.name) ||
+                            ty_param_names.contains(&p.segments[0].ident.name) ||
                             processed_field_types.contains(&p.segments) {
                                 continue;
                             };
@@ -830,7 +835,7 @@ fn find_repr_type_name(diagnostic: &Handler, type_attrs: &[ast::Attribute]) -> &
     for a in type_attrs {
         for r in &attr::find_repr_attrs(diagnostic, a) {
             repr_type_name = match *r {
-                attr::ReprPacked | attr::ReprSimd | attr::ReprAlign(_) | attr::ReprTransparent =>
+                attr::ReprPacked(_) | attr::ReprSimd | attr::ReprAlign(_) | attr::ReprTransparent =>
                     continue,
 
                 attr::ReprC => "i32",
@@ -952,7 +957,7 @@ impl<'a> MethodDef<'a> {
         let args = {
             let self_args = explicit_self.map(|explicit_self| {
                 ast::Arg::from_self(explicit_self,
-                                    respan(trait_.span, keywords::SelfValue.ident()))
+                                    keywords::SelfValue.ident().with_span_pos(trait_.span))
             });
             let nonself_args = arg_types.into_iter()
                 .map(|(name, ty)| cx.arg(trait_.span, name, ty));
@@ -962,7 +967,7 @@ impl<'a> MethodDef<'a> {
         let ret_type = self.get_ret_ty(cx, trait_, generics, type_ident);
 
         let method_ident = cx.ident_of(self.name);
-        let fn_decl = cx.fn_decl(args, ret_type);
+        let fn_decl = cx.fn_decl(args, ast::FunctionRetTy::Ty(ret_type));
         let body_block = cx.block_expr(body);
 
         let unsafety = if self.is_unsafe {
@@ -1537,10 +1542,9 @@ impl<'a> MethodDef<'a> {
         let summary = enum_def.variants
             .iter()
             .map(|v| {
-                let ident = v.node.name;
                 let sp = v.span.with_ctxt(trait_.span.ctxt());
                 let summary = trait_.summarise_struct(cx, &v.node.data);
-                (ident, sp, summary)
+                (v.node.ident, sp, summary)
             })
             .collect();
         self.call_substructure_method(cx,
@@ -1581,7 +1585,7 @@ impl<'a> TraitDef<'a> {
 
     fn create_subpatterns(&self,
                           cx: &mut ExtCtxt,
-                          field_paths: Vec<ast::SpannedIdent>,
+                          field_paths: Vec<ast::Ident>,
                           mutbl: ast::Mutability,
                           use_temporaries: bool)
                           -> Vec<P<ast::Pat>> {
@@ -1613,10 +1617,7 @@ impl<'a> TraitDef<'a> {
         for (i, struct_field) in struct_def.fields().iter().enumerate() {
             let sp = struct_field.span.with_ctxt(self.span.ctxt());
             let ident = cx.ident_of(&format!("{}_{}", prefix, i));
-            paths.push(codemap::Spanned {
-                span: sp,
-                node: ident,
-            });
+            paths.push(ident.with_span_pos(sp));
             let val = cx.expr_path(cx.path_ident(sp, ident));
             let val = if use_temporaries {
                 val
@@ -1669,9 +1670,8 @@ impl<'a> TraitDef<'a> {
          prefix: &str,
          mutbl: ast::Mutability)
          -> (P<ast::Pat>, Vec<(Span, Option<Ident>, P<Expr>, &'a [ast::Attribute])>) {
-        let variant_ident = variant.node.name;
         let sp = variant.span.with_ctxt(self.span.ctxt());
-        let variant_path = cx.path(sp, vec![enum_ident, variant_ident]);
+        let variant_path = cx.path(sp, vec![enum_ident, variant.node.ident]);
         let use_temporaries = false; // enums can't be repr(packed)
         self.create_struct_pattern(cx, variant_path, &variant.node.data, prefix, mutbl,
                                    use_temporaries)

@@ -123,7 +123,7 @@ pub struct HygieneData {
     marks: Vec<MarkData>,
     syntax_contexts: Vec<SyntaxContextData>,
     markings: HashMap<(SyntaxContext, Mark), SyntaxContext>,
-    gensym_to_ctxt: HashMap<Symbol, SyntaxContext>,
+    gensym_to_ctxt: HashMap<Symbol, Span>,
 }
 
 impl HygieneData {
@@ -430,18 +430,18 @@ pub enum ExpnFormat {
 /// The kind of compiler desugaring.
 #[derive(Clone, Hash, Debug, PartialEq, Eq, RustcEncodable, RustcDecodable)]
 pub enum CompilerDesugaringKind {
-    BackArrow,
     DotFill,
     QuestionMark,
+    Catch,
 }
 
 impl CompilerDesugaringKind {
     pub fn as_symbol(&self) -> Symbol {
         use CompilerDesugaringKind::*;
         let s = match *self {
-            BackArrow => "<-",
             DotFill => "...",
             QuestionMark => "?",
+            Catch => "do catch",
         };
         Symbol::intern(s)
     }
@@ -463,7 +463,7 @@ impl Symbol {
     pub fn from_ident(ident: Ident) -> Symbol {
         HygieneData::with(|data| {
             let gensym = ident.name.gensymed();
-            data.gensym_to_ctxt.insert(gensym, ident.ctxt);
+            data.gensym_to_ctxt.insert(gensym, ident.span);
             gensym
         })
     }
@@ -471,7 +471,7 @@ impl Symbol {
     pub fn to_ident(self) -> Ident {
         HygieneData::with(|data| {
             match data.gensym_to_ctxt.get(&self) {
-                Some(&ctxt) => Ident { name: self.interned(), ctxt: ctxt },
+                Some(&span) => Ident::new(self.interned(), span),
                 None => Ident::with_empty_ctxt(self),
             }
         })

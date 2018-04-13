@@ -362,7 +362,9 @@ enum EvaluationResult {
     /// When checking `foo`, we have to prove `T: Trait`. This basically
     /// translates into this:
     ///
+    /// ```plain,ignore
     ///     (T: Trait + Sized →_\impl T: Trait), T: Trait ⊢ T: Trait
+    /// ```
     ///
     /// When we try to prove it, we first go the first option, which
     /// recurses. This shows us that the impl is "useless" - it won't
@@ -959,11 +961,21 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
         if self.can_use_global_caches(param_env) {
             let mut cache = self.tcx().evaluation_cache.hashmap.borrow_mut();
             if let Some(trait_ref) = self.tcx().lift_to_global(&trait_ref) {
+                debug!(
+                    "insert_evaluation_cache(trait_ref={:?}, candidate={:?}) global",
+                    trait_ref,
+                    result,
+                );
                 cache.insert(trait_ref, WithDepNode::new(dep_node, result));
                 return;
             }
         }
 
+        debug!(
+            "insert_evaluation_cache(trait_ref={:?}, candidate={:?})",
+            trait_ref,
+            result,
+        );
         self.infcx.evaluation_cache.hashmap
                                    .borrow_mut()
                                    .insert(trait_ref, WithDepNode::new(dep_node, result));
@@ -985,7 +997,7 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
     {
         // Watch out for overflow. This intentionally bypasses (and does
         // not update) the cache.
-        let recursion_limit = self.infcx.tcx.sess.recursion_limit.get();
+        let recursion_limit = *self.infcx.tcx.sess.recursion_limit.get();
         if stack.obligation.recursion_depth >= recursion_limit {
             self.infcx().report_overflow_error(&stack.obligation, true);
         }
@@ -1067,25 +1079,29 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
                 if self.intercrate_ambiguity_causes.is_some() {
                     debug!("evaluate_stack: intercrate_ambiguity_causes is some");
                     // Heuristics: show the diagnostics when there are no candidates in crate.
-                    let candidate_set = self.assemble_candidates(stack)?;
-                    if !candidate_set.ambiguous && candidate_set.vec.iter().all(|c| {
-                        !self.evaluate_candidate(stack, &c).may_apply()
-                    }) {
-                        let trait_ref = stack.obligation.predicate.skip_binder().trait_ref;
-                        let self_ty = trait_ref.self_ty();
-                        let trait_desc = trait_ref.to_string();
-                        let self_desc = if self_ty.has_concrete_skeleton() {
-                            Some(self_ty.to_string())
-                        } else {
-                            None
-                        };
-                        let cause = if let Conflict::Upstream = conflict {
-                            IntercrateAmbiguityCause::UpstreamCrateUpdate { trait_desc, self_desc }
-                        } else {
-                            IntercrateAmbiguityCause::DownstreamCrate { trait_desc, self_desc }
-                        };
-                        debug!("evaluate_stack: pushing cause = {:?}", cause);
-                        self.intercrate_ambiguity_causes.as_mut().unwrap().push(cause);
+                    if let Ok(candidate_set) = self.assemble_candidates(stack) {
+                        if !candidate_set.ambiguous && candidate_set.vec.iter().all(|c| {
+                            !self.evaluate_candidate(stack, &c).may_apply()
+                        }) {
+                            let trait_ref = stack.obligation.predicate.skip_binder().trait_ref;
+                            let self_ty = trait_ref.self_ty();
+                            let trait_desc = trait_ref.to_string();
+                            let self_desc = if self_ty.has_concrete_skeleton() {
+                                Some(self_ty.to_string())
+                            } else {
+                                None
+                            };
+                            let cause = if let Conflict::Upstream = conflict {
+                                IntercrateAmbiguityCause::UpstreamCrateUpdate {
+                                    trait_desc,
+                                    self_desc,
+                                }
+                            } else {
+                                IntercrateAmbiguityCause::DownstreamCrate { trait_desc, self_desc }
+                            };
+                            debug!("evaluate_stack: pushing cause = {:?}", cause);
+                            self.intercrate_ambiguity_causes.as_mut().unwrap().push(cause);
+                        }
                     }
                 }
                 return Ok(None);
@@ -1283,12 +1299,22 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
             let mut cache = tcx.selection_cache.hashmap.borrow_mut();
             if let Some(trait_ref) = tcx.lift_to_global(&trait_ref) {
                 if let Some(candidate) = tcx.lift_to_global(&candidate) {
+                    debug!(
+                        "insert_candidate_cache(trait_ref={:?}, candidate={:?}) global",
+                        trait_ref,
+                        candidate,
+                    );
                     cache.insert(trait_ref, WithDepNode::new(dep_node, candidate));
                     return;
                 }
             }
         }
 
+        debug!(
+            "insert_candidate_cache(trait_ref={:?}, candidate={:?}) local",
+            trait_ref,
+            candidate,
+        );
         self.infcx.selection_cache.hashmap
                                   .borrow_mut()
                                   .insert(trait_ref, WithDepNode::new(dep_node, candidate));
@@ -2061,11 +2087,15 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
 
         match self_ty.sty {
             ty::TyInfer(ty::IntVar(_)) | ty::TyInfer(ty::FloatVar(_)) |
-            ty::TyUint(_) | ty::TyInt(_) | ty::TyBool | ty::TyFloat(_) |
-            ty::TyFnDef(..) | ty::TyFnPtr(_) | ty::TyChar |
-            ty::TyRawPtr(..) | ty::TyError | ty::TyNever |
-            ty::TyRef(_, ty::TypeAndMut { ty: _, mutbl: hir::MutImmutable }) => {
+            ty::TyFnDef(..) | ty::TyFnPtr(_) | ty::TyError => {
                 Where(ty::Binder(Vec::new()))
+            }
+
+            ty::TyUint(_) | ty::TyInt(_) | ty::TyBool | ty::TyFloat(_) |
+            ty::TyChar | ty::TyRawPtr(..) | ty::TyNever |
+            ty::TyRef(_, ty::TypeAndMut { ty: _, mutbl: hir::MutImmutable }) => {
+                // Implementations provided in libcore
+                None
             }
 
             ty::TyDynamic(..) | ty::TyStr | ty::TySlice(..) |
@@ -2086,14 +2116,9 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
 
             ty::TyClosure(def_id, substs) => {
                 let trait_id = obligation.predicate.def_id();
-                let copy_closures =
-                    Some(trait_id) == self.tcx().lang_items().copy_trait() &&
-                    self.tcx().has_copy_closures(def_id.krate);
-                let clone_closures =
-                    Some(trait_id) == self.tcx().lang_items().clone_trait() &&
-                    self.tcx().has_clone_closures(def_id.krate);
-
-                if copy_closures || clone_closures {
+                let is_copy_trait = Some(trait_id) == self.tcx().lang_items().copy_trait();
+                let is_clone_trait = Some(trait_id) == self.tcx().lang_items().clone_trait();
+                if is_copy_trait || is_clone_trait {
                     Where(ty::Binder(substs.upvar_tys(def_id, self.tcx()).collect()))
                 } else {
                     Never
@@ -3045,8 +3070,7 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
             snapshot);
         let skol_obligation_trait_ref = skol_obligation.trait_ref;
 
-        let impl_substs = self.infcx.fresh_substs_for_item(obligation.param_env.universe,
-                                                           obligation.cause.span,
+        let impl_substs = self.infcx.fresh_substs_for_item(obligation.cause.span,
                                                            impl_def_id);
 
         let impl_trait_ref = impl_trait_ref.subst(self.tcx(),

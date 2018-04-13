@@ -27,6 +27,7 @@ use std::slice;
 use require_c_abi_if_variadic;
 use util::common::ErrorReported;
 use util::nodemap::FxHashSet;
+use errors::FatalError;
 
 use std::iter;
 use syntax::{abi, ast};
@@ -337,7 +338,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> AstConv<'gcx, 'tcx>+'o {
             Def::Trait(trait_def_id) => trait_def_id,
             Def::TraitAlias(alias_def_id) => alias_def_id,
             Def::Err => {
-                self.tcx().sess.fatal("cannot continue compilation due to previous error");
+                FatalError.raise();
             }
             _ => unreachable!(),
         }
@@ -530,7 +531,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> AstConv<'gcx, 'tcx>+'o {
             let msg = format!("associated type `{}` is private", binding.item_name);
             tcx.sess.span_err(binding.span, &msg);
         }
-        tcx.check_stability(assoc_ty.def_id, ref_id, binding.span);
+        tcx.check_stability(assoc_ty.def_id, Some(ref_id), binding.span);
 
         Ok(candidate.map_bound(|trait_ref| {
             ty::ProjectionPredicate {
@@ -868,7 +869,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> AstConv<'gcx, 'tcx>+'o {
             let msg = format!("{} `{}` is private", def.kind_name(), assoc_name);
             tcx.sess.span_err(span, &msg);
         }
-        tcx.check_stability(item.def_id, ref_id, span);
+        tcx.check_stability(item.def_id, Some(ref_id), span);
 
         (ty, def)
     }
@@ -978,7 +979,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> AstConv<'gcx, 'tcx>+'o {
                 let item_def_id = tcx.hir.local_def_id(item_id);
                 let generics = tcx.generics_of(item_def_id);
                 let index = generics.type_param_to_index[&tcx.hir.local_def_id(node_id)];
-                tcx.mk_param(index, tcx.hir.name(node_id))
+                tcx.mk_param(index, tcx.hir.name(node_id).as_str())
             }
             Def::SelfTy(_, Some(def_id)) => {
                 // Self in impl (we know the concrete type).

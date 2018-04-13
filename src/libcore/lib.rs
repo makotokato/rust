@@ -63,7 +63,6 @@
 #![no_core]
 #![deny(missing_docs)]
 #![deny(missing_debug_implementations)]
-#![deny(warnings)]
 
 #![feature(allow_internal_unstable)]
 #![feature(asm)]
@@ -78,14 +77,13 @@
 #![feature(doc_spotlight)]
 #![feature(fn_must_use)]
 #![feature(fundamental)]
-#![feature(i128_type)]
-#![cfg_attr(stage0, feature(inclusive_range_syntax))]
 #![feature(intrinsics)]
 #![feature(iterator_flatten)]
 #![feature(iterator_repeat_with)]
 #![feature(lang_items)]
 #![feature(link_llvm_intrinsics)]
 #![feature(exhaustive_patterns)]
+#![feature(macro_at_most_once_rep)]
 #![feature(no_core)]
 #![feature(on_unimplemented)]
 #![feature(optin_builtin_traits)]
@@ -101,9 +99,6 @@
 #![feature(unboxed_closures)]
 #![feature(untagged_unions)]
 #![feature(unwind_attributes)]
-
-#![cfg_attr(stage0, allow(unused_attributes))]
-#![cfg_attr(stage0, feature(never_type))]
 
 #[prelude_import]
 #[allow(unused)]
@@ -185,8 +180,13 @@ pub mod hash;
 pub mod fmt;
 pub mod time;
 
+pub mod unicode;
+
+/* Heap memory allocator trait */
+#[allow(missing_docs)]
+pub mod heap;
+
 // note: does not need to be public
-mod char_private;
 mod iter_private;
 mod tuple;
 mod unit;

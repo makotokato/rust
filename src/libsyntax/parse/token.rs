@@ -25,9 +25,8 @@ use syntax_pos::{self, Span, FileName};
 use tokenstream::{TokenStream, TokenTree};
 use tokenstream;
 
-use std::cell::Cell;
 use std::{cmp, fmt};
-use rustc_data_structures::sync::Lrc;
+use rustc_data_structures::sync::{Lrc, Lock};
 
 #[derive(Clone, RustcEncodable, RustcDecodable, PartialEq, Eq, Hash, Debug, Copy)]
 pub enum BinOpToken {
@@ -91,8 +90,8 @@ impl Lit {
     }
 }
 
-fn ident_can_begin_expr(ident: ast::Ident) -> bool {
-    let ident_token: Token = Ident(ident);
+pub(crate) fn ident_can_begin_expr(ident: ast::Ident, is_raw: bool) -> bool {
+    let ident_token: Token = Ident(ident, is_raw);
 
     !ident_token.is_reserved_ident() ||
     ident_token.is_path_segment_keyword() ||
@@ -116,8 +115,8 @@ fn ident_can_begin_expr(ident: ast::Ident) -> bool {
     ].contains(&ident.name)
 }
 
-fn ident_can_begin_type(ident: ast::Ident) -> bool {
-    let ident_token: Token = Ident(ident);
+fn ident_can_begin_type(ident: ast::Ident, is_raw: bool) -> bool {
+    let ident_token: Token = Ident(ident, is_raw);
 
     !ident_token.is_reserved_ident() ||
     ident_token.is_path_segment_keyword() ||
@@ -130,6 +129,44 @@ fn ident_can_begin_type(ident: ast::Ident) -> bool {
         keywords::Extern.name(),
         keywords::Typeof.name(),
     ].contains(&ident.name)
+}
+
+pub fn is_path_segment_keyword(id: ast::Ident) -> bool {
+    id.name == keywords::Super.name() ||
+    id.name == keywords::SelfValue.name() ||
+    id.name == keywords::SelfType.name() ||
+    id.name == keywords::Extern.name() ||
+    id.name == keywords::Crate.name() ||
+    id.name == keywords::CrateRoot.name() ||
+    id.name == keywords::DollarCrate.name()
+}
+
+// We see this identifier in a normal identifier position, like variable name or a type.
+// How was it written originally? Did it use the raw form? Let's try to guess.
+pub fn is_raw_guess(ident: ast::Ident) -> bool {
+    ident.name != keywords::Invalid.name() &&
+    is_reserved_ident(ident) && !is_path_segment_keyword(ident)
+}
+
+// Returns true for reserved identifiers used internally for elided lifetimes,
+// unnamed method parameters, crate root module, error recovery etc.
+pub fn is_special_ident(id: ast::Ident) -> bool {
+    id.name <= keywords::Underscore.name()
+}
+
+/// Returns `true` if the token is a keyword used in the language.
+pub fn is_used_keyword(id: ast::Ident) -> bool {
+    id.name >= keywords::As.name() && id.name <= keywords::While.name()
+}
+
+/// Returns `true` if the token is a keyword reserved for possible future use.
+pub fn is_unused_keyword(id: ast::Ident) -> bool {
+    id.name >= keywords::Abstract.name() && id.name <= keywords::Yield.name()
+}
+
+/// Returns `true` if the token is either a special identifier or a keyword.
+pub fn is_reserved_ident(id: ast::Ident) -> bool {
+    is_special_ident(id) || is_used_keyword(id) || is_unused_keyword(id)
 }
 
 #[derive(Clone, RustcEncodable, RustcDecodable, PartialEq, Eq, Hash, Debug)]
@@ -175,7 +212,7 @@ pub enum Token {
     Literal(Lit, Option<ast::Name>),
 
     /* Name components */
-    Ident(ast::Ident),
+    Ident(ast::Ident, /* is_raw */ bool),
     Lifetime(ast::Ident),
 
     // The `LazyTokenStream` is a pure function of the `Nonterminal`,
@@ -203,6 +240,11 @@ impl Token {
         Token::Interpolated(Lrc::new((nt, LazyTokenStream::new())))
     }
 
+    /// Recovers a `Token` from an `ast::Ident`. This creates a raw identifier if necessary.
+    pub fn from_ast_ident(ident: ast::Ident) -> Token {
+        Ident(ident, is_raw_guess(ident))
+    }
+
     /// Returns `true` if the token starts with '>'.
     pub fn is_like_gt(&self) -> bool {
         match *self {
@@ -214,7 +256,8 @@ impl Token {
     /// Returns `true` if the token can appear at the start of an expression.
     pub fn can_begin_expr(&self) -> bool {
         match *self {
-            Ident(ident)                => ident_can_begin_expr(ident), // value name or keyword
+            Ident(ident, is_raw)              =>
+                ident_can_begin_expr(ident, is_raw), // value name or keyword
             OpenDelim(..)                     | // tuple, array or block
             Literal(..)                       | // literal
             Not                               | // operator not
@@ -239,7 +282,8 @@ impl Token {
     /// Returns `true` if the token can appear at the start of a type.
     pub fn can_begin_type(&self) -> bool {
         match *self {
-            Ident(ident)                => ident_can_begin_type(ident), // type name or keyword
+            Ident(ident, is_raw)        =>
+                ident_can_begin_type(ident, is_raw), // type name or keyword
             OpenDelim(Paren)            | // tuple
             OpenDelim(Bracket)          | // array
             Not                         | // never
@@ -272,20 +316,44 @@ impl Token {
         }
     }
 
-    pub fn ident(&self) -> Option<ast::Ident> {
+    /// Returns an identifier if this token is an identifier.
+    pub fn ident(&self) -> Option<(ast::Ident, /* is_raw */ bool)> {
         match *self {
-            Ident(ident) => Some(ident),
+            Ident(ident, is_raw) => Some((ident, is_raw)),
             Interpolated(ref nt) => match nt.0 {
-                NtIdent(ident) => Some(ident.node),
+                NtIdent(ident, is_raw) => Some((ident, is_raw)),
                 _ => None,
             },
             _ => None,
         }
     }
-
+    /// Returns a lifetime identifier if this token is a lifetime.
+    pub fn lifetime(&self) -> Option<ast::Ident> {
+        match *self {
+            Lifetime(ident) => Some(ident),
+            Interpolated(ref nt) => match nt.0 {
+                NtLifetime(ident) => Some(ident),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
     /// Returns `true` if the token is an identifier.
     pub fn is_ident(&self) -> bool {
         self.ident().is_some()
+    }
+    /// Returns `true` if the token is a lifetime.
+    pub fn is_lifetime(&self) -> bool {
+        self.lifetime().is_some()
+    }
+
+    /// Returns `true` if the token is a identifier whose name is the given
+    /// string slice.
+    pub fn is_ident_named(&self, name: &str) -> bool {
+        match self.ident() {
+            Some((ident, _)) => ident.name.as_str() == name,
+            None => false
+        }
     }
 
     /// Returns `true` if the token is a documentation comment.
@@ -314,26 +382,6 @@ impl Token {
         false
     }
 
-    /// Returns a lifetime with the span and a dummy id if it is a lifetime,
-    /// or the original lifetime if it is an interpolated lifetime, ignoring
-    /// the span.
-    pub fn lifetime(&self, span: Span) -> Option<ast::Lifetime> {
-        match *self {
-            Lifetime(ident) =>
-                Some(ast::Lifetime { ident: ident, span: span, id: ast::DUMMY_NODE_ID }),
-            Interpolated(ref nt) => match nt.0 {
-                NtLifetime(lifetime) => Some(lifetime),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// Returns `true` if the token is a lifetime.
-    pub fn is_lifetime(&self) -> bool {
-        self.lifetime(syntax_pos::DUMMY_SP).is_some()
-    }
-
     /// Returns `true` if the token is either the `mut` or `const` keyword.
     pub fn is_mutability(&self) -> bool {
         self.is_keyword(keywords::Mut) ||
@@ -351,19 +399,13 @@ impl Token {
 
     /// Returns `true` if the token is a given keyword, `kw`.
     pub fn is_keyword(&self, kw: keywords::Keyword) -> bool {
-        self.ident().map(|ident| ident.name == kw.name()).unwrap_or(false)
+        self.ident().map(|(ident, is_raw)| ident.name == kw.name() && !is_raw).unwrap_or(false)
     }
 
     pub fn is_path_segment_keyword(&self) -> bool {
         match self.ident() {
-            Some(id) => id.name == keywords::Super.name() ||
-                        id.name == keywords::SelfValue.name() ||
-                        id.name == keywords::SelfType.name() ||
-                        id.name == keywords::Extern.name() ||
-                        id.name == keywords::Crate.name() ||
-                        id.name == keywords::CrateRoot.name() ||
-                        id.name == keywords::DollarCrate.name(),
-            None => false,
+            Some((id, false)) => is_path_segment_keyword(id),
+            _ => false,
         }
     }
 
@@ -371,7 +413,7 @@ impl Token {
     // unnamed method parameters, crate root module, error recovery etc.
     pub fn is_special_ident(&self) -> bool {
         match self.ident() {
-            Some(id) => id.name <= keywords::Underscore.name(),
+            Some((id, false)) => is_special_ident(id),
             _ => false,
         }
     }
@@ -379,7 +421,7 @@ impl Token {
     /// Returns `true` if the token is a keyword used in the language.
     pub fn is_used_keyword(&self) -> bool {
         match self.ident() {
-            Some(id) => id.name >= keywords::As.name() && id.name <= keywords::While.name(),
+            Some((id, false)) => is_used_keyword(id),
             _ => false,
         }
     }
@@ -387,7 +429,15 @@ impl Token {
     /// Returns `true` if the token is a keyword reserved for possible future use.
     pub fn is_unused_keyword(&self) -> bool {
         match self.ident() {
-            Some(id) => id.name >= keywords::Abstract.name() && id.name <= keywords::Yield.name(),
+            Some((id, false)) => is_unused_keyword(id),
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if the token is either a special identifier or a keyword.
+    pub fn is_reserved_ident(&self) -> bool {
+        match self.ident() {
+            Some((id, false)) => is_reserved_ident(id),
             _ => false,
         }
     }
@@ -458,11 +508,6 @@ impl Token {
         }
     }
 
-    /// Returns `true` if the token is either a special identifier or a keyword.
-    pub fn is_reserved_ident(&self) -> bool {
-        self.is_special_ident() || self.is_used_keyword() || self.is_unused_keyword()
-    }
-
     pub fn interpolated_to_tokenstream(&self, sess: &ParseSess, span: Span)
         -> TokenStream
     {
@@ -496,13 +541,13 @@ impl Token {
             Nonterminal::NtImplItem(ref item) => {
                 tokens = prepend_attrs(sess, &item.attrs, item.tokens.as_ref(), span);
             }
-            Nonterminal::NtIdent(ident) => {
-                let token = Token::Ident(ident.node);
+            Nonterminal::NtIdent(ident, is_raw) => {
+                let token = Token::Ident(ident, is_raw);
                 tokens = Some(TokenTree::Token(ident.span, token).into());
             }
-            Nonterminal::NtLifetime(lifetime) => {
-                let token = Token::Lifetime(lifetime.ident);
-                tokens = Some(TokenTree::Token(lifetime.span, token).into());
+            Nonterminal::NtLifetime(ident) => {
+                let token = Token::Lifetime(ident);
+                tokens = Some(TokenTree::Token(ident.span, token).into());
             }
             Nonterminal::NtTT(ref tt) => {
                 tokens = Some(tt.clone().into());
@@ -529,7 +574,8 @@ pub enum Nonterminal {
     NtPat(P<ast::Pat>),
     NtExpr(P<ast::Expr>),
     NtTy(P<ast::Ty>),
-    NtIdent(ast::SpannedIdent),
+    NtIdent(ast::Ident, /* is_raw */ bool),
+    NtLifetime(ast::Ident),
     /// Stuff inside brackets for attributes
     NtMeta(ast::MetaItem),
     NtPath(ast::Path),
@@ -539,10 +585,10 @@ pub enum Nonterminal {
     NtArm(ast::Arm),
     NtImplItem(ast::ImplItem),
     NtTraitItem(ast::TraitItem),
+    NtForeignItem(ast::ForeignItem),
     NtGenerics(ast::Generics),
     NtWhereClause(ast::WhereClause),
     NtArg(ast::Arg),
-    NtLifetime(ast::Lifetime),
 }
 
 impl fmt::Debug for Nonterminal {
@@ -561,6 +607,7 @@ impl fmt::Debug for Nonterminal {
             NtArm(..) => f.pad("NtArm(..)"),
             NtImplItem(..) => f.pad("NtImplItem(..)"),
             NtTraitItem(..) => f.pad("NtTraitItem(..)"),
+            NtForeignItem(..) => f.pad("NtForeignItem(..)"),
             NtGenerics(..) => f.pad("NtGenerics(..)"),
             NtWhereClause(..) => f.pad("NtWhereClause(..)"),
             NtArg(..) => f.pad("NtArg(..)"),
@@ -579,15 +626,8 @@ pub fn is_op(tok: &Token) -> bool {
     }
 }
 
-pub struct LazyTokenStream(Cell<Option<TokenStream>>);
-
-impl Clone for LazyTokenStream {
-    fn clone(&self) -> Self {
-        let opt_stream = self.0.take();
-        self.0.set(opt_stream.clone());
-        LazyTokenStream(Cell::new(opt_stream))
-    }
-}
+#[derive(Clone)]
+pub struct LazyTokenStream(Lock<Option<TokenStream>>);
 
 impl cmp::Eq for LazyTokenStream {}
 impl PartialEq for LazyTokenStream {
@@ -604,15 +644,14 @@ impl fmt::Debug for LazyTokenStream {
 
 impl LazyTokenStream {
     pub fn new() -> Self {
-        LazyTokenStream(Cell::new(None))
+        LazyTokenStream(Lock::new(None))
     }
 
     pub fn force<F: FnOnce() -> TokenStream>(&self, f: F) -> TokenStream {
-        let mut opt_stream = self.0.take();
+        let mut opt_stream = self.0.lock();
         if opt_stream.is_none() {
-            opt_stream = Some(f());
+            *opt_stream = Some(f());
         }
-        self.0.set(opt_stream.clone());
         opt_stream.clone().unwrap()
     }
 }

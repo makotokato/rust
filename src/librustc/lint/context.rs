@@ -41,7 +41,7 @@ use util::nodemap::FxHashMap;
 use std::default::Default as StdDefault;
 use std::cell::{Ref, RefCell};
 use syntax::ast;
-use syntax::epoch;
+use syntax::edition;
 use syntax_pos::{MultiSpan, Span};
 use errors::DiagnosticBuilder;
 use hir;
@@ -103,9 +103,9 @@ pub struct FutureIncompatibleInfo {
     pub id: LintId,
     /// e.g., a URL for an issue/PR/RFC or error code
     pub reference: &'static str,
-    /// If this is an epoch fixing lint, the epoch in which
+    /// If this is an edition fixing lint, the edition in which
     /// this lint becomes obsolete
-    pub epoch: Option<epoch::Epoch>,
+    pub edition: Option<edition::Edition>,
 }
 
 /// The target of the `by_name` map, which accounts for renaming/deprecation.
@@ -201,11 +201,11 @@ impl LintStore {
                                         sess: Option<&Session>,
                                         lints: Vec<FutureIncompatibleInfo>) {
 
-        for epoch in epoch::ALL_EPOCHS {
-            let lints = lints.iter().filter(|f| f.epoch == Some(*epoch)).map(|f| f.id)
+        for edition in edition::ALL_EDITIONS {
+            let lints = lints.iter().filter(|f| f.edition == Some(*edition)).map(|f| f.id)
                              .collect::<Vec<_>>();
             if !lints.is_empty() {
-                self.register_group(sess, false, epoch.lint_name(), lints)
+                self.register_group(sess, false, edition.lint_name(), lints)
             }
         }
 
@@ -952,8 +952,8 @@ impl<'a> ast_visit::Visitor<'a> for EarlyContext<'a> {
         ast_visit::walk_ty(self, t);
     }
 
-    fn visit_ident(&mut self, sp: Span, id: ast::Ident) {
-        run_lints!(self, check_ident, early_passes, sp, id);
+    fn visit_ident(&mut self, ident: ast::Ident) {
+        run_lints!(self, check_ident, early_passes, ident);
     }
 
     fn visit_mod(&mut self, m: &'a ast::Mod, s: Span, _a: &[ast::Attribute], n: ast::NodeId) {

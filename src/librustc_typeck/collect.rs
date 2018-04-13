@@ -35,8 +35,9 @@ use rustc::ty::{ToPredicate, ReprOptions};
 use rustc::ty::{self, AdtKind, ToPolyTraitRef, Ty, TyCtxt};
 use rustc::ty::maps::Providers;
 use rustc::ty::util::IntTypeExt;
-use rustc::util::nodemap::{FxHashSet, FxHashMap};
 use rustc::ty::util::Discr;
+use rustc::util::captures::Captures;
+use rustc::util::nodemap::{FxHashSet, FxHashMap};
 
 use syntax::{abi, ast};
 use syntax::ast::MetaItemKind;
@@ -63,6 +64,7 @@ pub fn provide(providers: &mut Providers) {
         type_of,
         generics_of,
         predicates_of,
+        explicit_predicates_of,
         super_predicates_of,
         type_param_predicates,
         trait_def,
@@ -240,7 +242,7 @@ fn type_param_predicates<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let param_owner_def_id = tcx.hir.local_def_id(param_owner);
     let generics = tcx.generics_of(param_owner_def_id);
     let index = generics.type_param_to_index[&def_id];
-    let ty = tcx.mk_param(index, tcx.hir.ty_param_name(param_id));
+    let ty = tcx.mk_param(index, tcx.hir.ty_param_name(param_id).as_str());
 
     // Don't look for bounds where the type parameter isn't in scope.
     let parent = if item_def_id == param_owner_def_id {
@@ -512,11 +514,11 @@ fn convert_struct_variant<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                     discr: ty::VariantDiscr,
                                     def: &hir::VariantData)
                                     -> ty::VariantDef {
-    let mut seen_fields: FxHashMap<ast::Name, Span> = FxHashMap();
+    let mut seen_fields: FxHashMap<ast::Ident, Span> = FxHashMap();
     let node_id = tcx.hir.as_local_node_id(did).unwrap();
     let fields = def.fields().iter().map(|f| {
         let fid = tcx.hir.local_def_id(f.id);
-        let dup_span = seen_fields.get(&f.name).cloned();
+        let dup_span = seen_fields.get(&f.name.to_ident()).cloned();
         if let Some(prev_span) = dup_span {
             struct_span_err!(tcx.sess, f.span, E0124,
                              "field `{}` is already declared",
@@ -525,7 +527,7 @@ fn convert_struct_variant<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                 .span_label(prev_span, format!("`{}` first declared here", f.name))
                 .emit();
         } else {
-            seen_fields.insert(f.name, f.span);
+            seen_fields.insert(f.name.to_ident(), f.span);
         }
 
         ty::FieldDef {
@@ -838,7 +840,7 @@ fn generics_of<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
                     opt_self = Some(ty::TypeParameterDef {
                         index: 0,
-                        name: keywords::SelfType.name(),
+                        name: keywords::SelfType.name().as_str(),
                         def_id: tcx.hir.local_def_id(param_id),
                         has_default: false,
                         object_lifetime_default: rl::Set1::Empty,
@@ -914,7 +916,7 @@ fn generics_of<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
         ty::TypeParameterDef {
             index: type_start + i as u32,
-            name: p.name,
+            name: p.name.as_str(),
             def_id: tcx.hir.local_def_id(p.id),
             has_default: p.default.is_some(),
             object_lifetime_default:
@@ -933,7 +935,7 @@ fn generics_of<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         // add a dummy parameter for the closure kind
         types.push(ty::TypeParameterDef {
             index: type_start,
-            name: Symbol::intern("<closure_kind>"),
+            name: Symbol::intern("<closure_kind>").as_str(),
             def_id,
             has_default: false,
             object_lifetime_default: rl::Set1::Empty,
@@ -944,7 +946,7 @@ fn generics_of<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         // add a dummy parameter for the closure signature
         types.push(ty::TypeParameterDef {
             index: type_start + 1,
-            name: Symbol::intern("<closure_signature>"),
+            name: Symbol::intern("<closure_signature>").as_str(),
             def_id,
             has_default: false,
             object_lifetime_default: rl::Set1::Empty,
@@ -955,7 +957,7 @@ fn generics_of<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         tcx.with_freevars(node_id, |fv| {
             types.extend(fv.iter().zip(2..).map(|(_, i)| ty::TypeParameterDef {
                 index: type_start + i,
-                name: Symbol::intern("<upvar>"),
+                name: Symbol::intern("<upvar>").as_str(),
                 def_id,
                 has_default: false,
                 object_lifetime_default: rl::Set1::Empty,
@@ -1281,7 +1283,7 @@ fn is_unsized<'gcx: 'tcx, 'tcx>(astconv: &AstConv<'gcx, 'tcx>,
 fn early_bound_lifetimes_from_generics<'a, 'tcx>(
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     ast_generics: &'a hir::Generics)
-    -> impl Iterator<Item=&'a hir::LifetimeDef>
+    -> impl Iterator<Item=&'a hir::LifetimeDef> + Captures<'tcx>
 {
     ast_generics
         .lifetimes()
@@ -1295,13 +1297,17 @@ fn predicates_of<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                            def_id: DefId)
                            -> ty::GenericPredicates<'tcx> {
     let explicit = explicit_predicates_of(tcx, def_id);
+    let predicates = if tcx.sess.features_untracked().infer_outlives_requirements {
+        [&explicit.predicates[..], &tcx.inferred_outlives_of(def_id)[..]].concat()
+    } else { explicit.predicates };
+
     ty::GenericPredicates {
         parent: explicit.parent,
-        predicates: [&explicit.predicates[..], &tcx.inferred_outlives_of(def_id)[..]].concat()
+        predicates: predicates,
     }
 }
 
-fn explicit_predicates_of<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
+pub fn explicit_predicates_of<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                            def_id: DefId)
                            -> ty::GenericPredicates<'tcx> {
     use rustc::hir::map::*;
@@ -1435,7 +1441,7 @@ fn explicit_predicates_of<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     // Collect the predicates that were written inline by the user on each
     // type parameter (e.g., `<T:Foo>`).
     for param in ast_generics.ty_params() {
-        let param_ty = ty::ParamTy::new(index, param.name).to_ty(tcx);
+        let param_ty = ty::ParamTy::new(index, param.name.as_str()).to_ty(tcx);
         index += 1;
 
         let bounds = compute_bounds(&icx,
@@ -1768,6 +1774,7 @@ fn trans_fn_attrs<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, id: DefId) -> TransFnAt
 
     let whitelist = tcx.target_features_whitelist(LOCAL_CRATE);
 
+    let mut inline_span = None;
     for attr in attrs.iter() {
         if attr.check_name("cold") {
             trans_fn_attrs.flags |= TransFnAttrFlags::COLD;
@@ -1799,6 +1806,7 @@ fn trans_fn_attrs<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, id: DefId) -> TransFnAt
                     }
                     MetaItemKind::List(ref items) => {
                         mark_used(attr);
+                        inline_span = Some(attr.span);
                         if items.len() != 1 {
                             span_err!(tcx.sess.diagnostic(), attr.span, E0534,
                                         "expected one argument");
@@ -1850,6 +1858,19 @@ fn trans_fn_attrs<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, id: DefId) -> TransFnAt
         } else if attr.check_name("linkage") {
             if let Some(val) = attr.value_str() {
                 trans_fn_attrs.linkage = Some(linkage_by_name(tcx, id, &val.as_str()));
+            }
+        }
+    }
+
+    // If a function uses #[target_feature] it can't be inlined into general
+    // purpose functions as they wouldn't have the right target features
+    // enabled. For that reason we also forbid #[inline(always)] as it can't be
+    // respected.
+    if trans_fn_attrs.target_features.len() > 0 {
+        if trans_fn_attrs.inline == InlineAttr::Always {
+            if let Some(span) = inline_span {
+                tcx.sess.span_err(span, "cannot use #[inline(always)] with \
+                                         #[target_feature]");
             }
         }
     }

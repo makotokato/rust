@@ -132,7 +132,13 @@ pub struct NativeLibrary {
     pub kind: NativeLibraryKind,
     pub name: Symbol,
     pub cfg: Option<ast::MetaItem>,
+    pub foreign_module: Option<DefId>,
+}
+
+#[derive(Clone, Hash, RustcEncodable, RustcDecodable)]
+pub struct ForeignModule {
     pub foreign_items: Vec<DefId>,
+    pub def_id: DefId,
 }
 
 pub enum LoadedMacro {
@@ -395,7 +401,7 @@ pub fn used_crates(tcx: TyCtxt, prefer: LinkagePreference)
         .collect::<Vec<_>>();
     let mut ordering = tcx.postorder_cnums(LOCAL_CRATE);
     Lrc::make_mut(&mut ordering).reverse();
-    libs.sort_by_key(|&(a, _)| {
+    libs.sort_by_cached_key(|&(a, _)| {
         ordering.iter().position(|x| *x == a)
     });
     libs

@@ -128,7 +128,7 @@ fn borrowck<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, owner_def_id: DefId)
     // Note that `mir_validated` is a "stealable" result; the
     // thief, `optimized_mir()`, forces borrowck, so we know that
     // is not yet stolen.
-    tcx.mir_validated(owner_def_id).borrow();
+    ty::maps::queries::mir_validated::ensure(tcx, owner_def_id);
 
     // option dance because you can't capture an uninitialized variable
     // by mut-ref.
@@ -370,7 +370,7 @@ const DOWNCAST_PRINTED_OPERATOR: &'static str = " as ";
 // is tracked is irrelevant here.)
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InteriorKind {
-    InteriorField(mc::FieldName),
+    InteriorField(mc::FieldIndex),
     InteriorElement,
 }
 
@@ -1336,18 +1336,10 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
                 out.push(')');
             }
 
-            LpExtend(ref lp_base, _, LpInterior(_, InteriorField(fname))) => {
+            LpExtend(ref lp_base, _, LpInterior(_, InteriorField(mc::FieldIndex(_, info)))) => {
                 self.append_autoderefd_loan_path_to_string(&lp_base, out);
-                match fname {
-                    mc::NamedField(fname) => {
-                        out.push('.');
-                        out.push_str(&fname.as_str());
-                    }
-                    mc::PositionalField(idx) => {
-                        out.push('.');
-                        out.push_str(&idx.to_string());
-                    }
-                }
+                out.push('.');
+                out.push_str(&info.as_str());
             }
 
             LpExtend(ref lp_base, _, LpInterior(_, InteriorElement)) => {
@@ -1422,8 +1414,7 @@ impl DataFlowOperator for LoanDataFlowOperator {
 impl<'tcx> fmt::Debug for InteriorKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            InteriorField(mc::NamedField(fld)) => write!(f, "{}", fld),
-            InteriorField(mc::PositionalField(i)) => write!(f, "#{}", i),
+            InteriorField(mc::FieldIndex(_, info)) => write!(f, "{}", info),
             InteriorElement => write!(f, "[]"),
         }
     }

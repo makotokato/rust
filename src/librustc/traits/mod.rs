@@ -34,7 +34,7 @@ use syntax::ast;
 use syntax_pos::{Span, DUMMY_SP};
 
 pub use self::coherence::{orphan_check, overlapping_impls, OrphanCheckErr, OverlapResult};
-pub use self::fulfill::FulfillmentContext;
+pub use self::fulfill::{FulfillmentContext, PendingPredicateObligation};
 pub use self::project::MismatchedProjectionTypes;
 pub use self::project::{normalize, normalize_projection_type, poly_project_and_unify_type};
 pub use self::project::{ProjectionCache, ProjectionCacheSnapshot, Reveal, Normalized};
@@ -45,6 +45,7 @@ pub use self::select::{EvaluationCache, SelectionContext, SelectionCache};
 pub use self::select::IntercrateAmbiguityCause;
 pub use self::specialize::{OverlapError, specialization_graph, translate_substs};
 pub use self::specialize::{SpecializesCache, find_associated_item};
+pub use self::engine::TraitEngine;
 pub use self::util::elaborate_predicates;
 pub use self::util::supertraits;
 pub use self::util::Supertraits;
@@ -54,6 +55,7 @@ pub use self::util::transitive_bounds;
 
 mod coherence;
 pub mod error_reporting;
+mod engine;
 mod fulfill;
 mod project;
 mod object_safety;
@@ -270,6 +272,8 @@ pub enum DomainGoal<'tcx> {
     TypeOutlives(ty::TypeOutlivesPredicate<'tcx>),
 }
 
+pub type PolyDomainGoal<'tcx> = ty::Binder<DomainGoal<'tcx>>;
+
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum QuantifierKind {
     Universal,
@@ -292,9 +296,15 @@ impl<'tcx> From<DomainGoal<'tcx>> for Goal<'tcx> {
     }
 }
 
-impl<'tcx> From<DomainGoal<'tcx>> for Clause<'tcx> {
-    fn from(domain_goal: DomainGoal<'tcx>) -> Self {
-        Clause::DomainGoal(domain_goal)
+impl<'tcx> From<PolyDomainGoal<'tcx>> for Goal<'tcx> {
+    fn from(domain_goal: PolyDomainGoal<'tcx>) -> Self {
+        match domain_goal.no_late_bound_regions() {
+            Some(p) => p.into(),
+            None => Goal::Quantified(
+                QuantifierKind::Universal,
+                Box::new(domain_goal.map_bound(|p| p.into()))
+            ),
+        }
     }
 }
 
@@ -302,10 +312,23 @@ impl<'tcx> From<DomainGoal<'tcx>> for Clause<'tcx> {
 /// Harrop Formulas".
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Clause<'tcx> {
-    // FIXME: again, use interned refs instead of `Box`
-    Implies(Vec<Goal<'tcx>>, DomainGoal<'tcx>),
-    DomainGoal(DomainGoal<'tcx>),
-    ForAll(Box<ty::Binder<Clause<'tcx>>>),
+    Implies(ProgramClause<'tcx>),
+    ForAll(ty::Binder<ProgramClause<'tcx>>),
+}
+
+/// A "program clause" has the form `D :- G1, ..., Gn`. It is saying
+/// that the domain goal `D` is true if `G1...Gn` are provable. This
+/// is equivalent to the implication `G1..Gn => D`; we usually write
+/// it with the reverse implication operator `:-` to emphasize the way
+/// that programs are actually solved (via backchaining, which starts
+/// with the goal to solve and proceeds from there).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct ProgramClause<'tcx> {
+    /// This goal will be considered true...
+    pub goal: DomainGoal<'tcx>,
+
+    /// ...if we can prove these hypotheses (there may be no hypotheses at all):
+    pub hypotheses: Vec<Goal<'tcx>>,
 }
 
 pub type Selection<'tcx> = Vtable<'tcx, PredicateObligation<'tcx>>;
@@ -610,8 +633,7 @@ pub fn normalize_param_env_or_error<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
            predicates);
 
     let elaborated_env = ty::ParamEnv::new(tcx.intern_predicates(&predicates),
-                                           unnormalized_env.reveal,
-                                           unnormalized_env.universe);
+                                           unnormalized_env.reveal);
 
     tcx.infer_ctxt().enter(|infcx| {
         // FIXME. We should really... do something with these region
@@ -685,9 +707,7 @@ pub fn normalize_param_env_or_error<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         debug!("normalize_param_env_or_error: resolved predicates={:?}",
                predicates);
 
-        ty::ParamEnv::new(tcx.intern_predicates(&predicates),
-                          unnormalized_env.reveal,
-                          unnormalized_env.universe)
+        ty::ParamEnv::new(tcx.intern_predicates(&predicates), unnormalized_env.reveal)
     })
 }
 

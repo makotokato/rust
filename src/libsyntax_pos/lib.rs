@@ -17,11 +17,9 @@
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![deny(warnings)]
 
 #![feature(const_fn)]
 #![feature(custom_attribute)]
-#![feature(i128_type)]
 #![feature(optin_builtin_traits)]
 #![allow(unused_attributes)]
 #![feature(specialization)]
@@ -50,7 +48,7 @@ extern crate serialize as rustc_serialize; // used by deriving
 extern crate unicode_width;
 
 pub mod hygiene;
-pub use hygiene::{SyntaxContext, ExpnInfo, ExpnFormat, NameAndSpan, CompilerDesugaringKind};
+pub use hygiene::{Mark, SyntaxContext, ExpnInfo, ExpnFormat, NameAndSpan, CompilerDesugaringKind};
 
 mod span_encoding;
 pub use span_encoding::{Span, DUMMY_SP};
@@ -184,8 +182,12 @@ impl SpanData {
     }
 }
 
-// The interner in thread-local, so `Span` shouldn't move between threads.
+// The interner is pointed to by a thread local value which is only set on the main thread
+// with parallelization is disabled. So we don't allow Span to transfer between threads
+// to avoid panics and other errors, even though it would be memory safe to do so.
+#[cfg(not(parallel_queries))]
 impl !Send for Span {}
+#[cfg(not(parallel_queries))]
 impl !Sync for Span {}
 
 impl PartialOrd for Span {
@@ -417,6 +419,52 @@ impl Span {
             end.lo,
             if end.ctxt == SyntaxContext::empty() { end.ctxt } else { span.ctxt },
         )
+    }
+
+    #[inline]
+    pub fn apply_mark(self, mark: Mark) -> Span {
+        let span = self.data();
+        span.with_ctxt(span.ctxt.apply_mark(mark))
+    }
+
+    #[inline]
+    pub fn remove_mark(&mut self) -> Mark {
+        let mut span = self.data();
+        let mark = span.ctxt.remove_mark();
+        *self = Span::new(span.lo, span.hi, span.ctxt);
+        mark
+    }
+
+    #[inline]
+    pub fn adjust(&mut self, expansion: Mark) -> Option<Mark> {
+        let mut span = self.data();
+        let mark = span.ctxt.adjust(expansion);
+        *self = Span::new(span.lo, span.hi, span.ctxt);
+        mark
+    }
+
+    #[inline]
+    pub fn glob_adjust(&mut self, expansion: Mark, glob_ctxt: SyntaxContext)
+                       -> Option<Option<Mark>> {
+        let mut span = self.data();
+        let mark = span.ctxt.glob_adjust(expansion, glob_ctxt);
+        *self = Span::new(span.lo, span.hi, span.ctxt);
+        mark
+    }
+
+    #[inline]
+    pub fn reverse_glob_adjust(&mut self, expansion: Mark, glob_ctxt: SyntaxContext)
+                               -> Option<Option<Mark>> {
+        let mut span = self.data();
+        let mark = span.ctxt.reverse_glob_adjust(expansion, glob_ctxt);
+        *self = Span::new(span.lo, span.hi, span.ctxt);
+        mark
+    }
+
+    #[inline]
+    pub fn modern(self) -> Span {
+        let span = self.data();
+        span.with_ctxt(span.ctxt.modern())
     }
 }
 

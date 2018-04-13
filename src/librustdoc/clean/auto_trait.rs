@@ -171,7 +171,7 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
             let mut segments = path.segments.into_vec();
             let last = segments.pop().unwrap();
 
-            let real_name = name.as_ref().map(|n| Symbol::from(n.as_str()));
+            let real_name = name.map(|name| Symbol::intern(&name));
 
             segments.push(hir::PathSegment::new(
                 real_name.unwrap_or(last.name),
@@ -260,7 +260,9 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
                 P(hir::Path {
                     span: DUMMY_SP,
                     def: Def::TyParam(param.def_id),
-                    segments: HirVec::from_vec(vec![hir::PathSegment::from_name(param.name)]),
+                    segments: HirVec::from_vec(vec![
+                        hir::PathSegment::from_name(Symbol::intern(&param.name))
+                    ]),
                 }),
             )),
             span: DUMMY_SP,
@@ -685,14 +687,12 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
             new_env = ty::ParamEnv::new(
                 tcx.mk_predicates(normalized_preds),
                 param_env.reveal,
-                ty::UniverseIndex::ROOT,
             );
         }
 
         let final_user_env = ty::ParamEnv::new(
             tcx.mk_predicates(user_computed_preds.into_iter()),
             user_env.reveal,
-            ty::UniverseIndex::ROOT,
         );
         debug!(
             "evaluate_nested_obligations(ty_did={:?}, trait_did={:?}): succeeded with '{:?}' \
@@ -1437,9 +1437,7 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
     // involved (impls rarely have more than a few bounds) means that it
     // shouldn't matter in practice.
     fn unstable_debug_sort<T: Debug>(&self, vec: &mut Vec<T>) {
-        vec.sort_unstable_by(|first, second| {
-            format!("{:?}", first).cmp(&format!("{:?}", second))
-        });
+        vec.sort_by_cached_key(|x| format!("{:?}", x))
     }
 
     fn is_fn_ty(&self, tcx: &TyCtxt, ty: &Type) -> bool {

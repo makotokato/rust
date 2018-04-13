@@ -13,6 +13,7 @@ use common::{CompileFail, ParseFail, Pretty, RunFail, RunPass, RunPassValgrind};
 use common::{Codegen, CodegenUnits, DebugInfoGdb, DebugInfoLldb, Rustdoc};
 use common::{Incremental, MirOpt, RunMake, Ui};
 use common::{expected_output_path, UI_STDERR, UI_STDOUT};
+use common::CompareMode;
 use diff;
 use errors::{self, Error, ErrorKind};
 use filetime::FileTime;
@@ -1325,6 +1326,8 @@ impl<'test> TestCx<'test> {
 
         rustdoc
             .arg("-L")
+            .arg(self.config.run_lib_path.to_str().unwrap())
+            .arg("-L")
             .arg(aux_dir)
             .arg("-o")
             .arg(out_dir)
@@ -1679,6 +1682,13 @@ impl<'test> TestCx<'test> {
             TargetLocation::ThisDirectory(path) => {
                 rustc.arg("--out-dir").arg(path);
             }
+        }
+
+        match self.config.compare_mode {
+            Some(CompareMode::Nll) => {
+                rustc.args(&["-Znll", "-Zborrowck=mir", "-Ztwo-phase-borrows"]);
+            },
+            None => {},
         }
 
         if self.props.force_host {
@@ -2358,11 +2368,6 @@ impl<'test> TestCx<'test> {
     }
 
     fn run_rmake_test(&self) {
-        // FIXME(#11094): we should fix these tests
-        if self.config.host != self.config.target {
-            return;
-        }
-
         let cwd = env::current_dir().unwrap();
         let src_root = self.config
             .src_base
@@ -2399,13 +2404,6 @@ impl<'test> TestCx<'test> {
             .env("S", src_root)
             .env("RUST_BUILD_STAGE", &self.config.stage_id)
             .env("RUSTC", cwd.join(&self.config.rustc_path))
-            .env(
-                "RUSTDOC",
-                cwd.join(&self.config
-                    .rustdoc_path
-                    .as_ref()
-                    .expect("--rustdoc-path passed")),
-            )
             .env("TMPDIR", &tmpdir)
             .env("LD_LIB_PATH_ENVVAR", dylib_env_var())
             .env("HOST_RPATH_DIR", cwd.join(&self.config.compile_lib_path))
@@ -2420,6 +2418,14 @@ impl<'test> TestCx<'test> {
             .env_remove("MFLAGS")
             .env_remove("CARGO_MAKEFLAGS");
 
+        if let Some(ref rustdoc) = self.config.rustdoc_path {
+            cmd.env("RUSTDOC", cwd.join(rustdoc));
+        }
+
+        if let Some(ref node) = self.config.nodejs {
+            cmd.env("NODE", node);
+        }
+
         if let Some(ref linker) = self.config.linker {
             cmd.env("RUSTC_LINKER", linker);
         }
@@ -2428,7 +2434,7 @@ impl<'test> TestCx<'test> {
         // compiler flags set in the test cases:
         cmd.env_remove("RUSTFLAGS");
 
-        if self.config.target.contains("msvc") {
+        if self.config.target.contains("msvc") && self.config.cc != "" {
             // We need to pass a path to `lib.exe`, so assume that `cc` is `cl.exe`
             // and that `lib.exe` lives next to it.
             let lib = Path::new(&self.config.cc).parent().unwrap().join("lib.exe");
@@ -2507,11 +2513,8 @@ impl<'test> TestCx<'test> {
         let proc_res = self.compile_test();
         self.check_if_test_should_compile(&proc_res);
 
-        let expected_stderr_path = self.expected_output_path(UI_STDERR);
-        let expected_stderr = self.load_expected_output(&expected_stderr_path);
-
-        let expected_stdout_path = self.expected_output_path(UI_STDOUT);
-        let expected_stdout = self.load_expected_output(&expected_stdout_path);
+        let expected_stderr = self.load_expected_output(UI_STDERR);
+        let expected_stdout = self.load_expected_output(UI_STDOUT);
 
         let normalized_stdout =
             self.normalize_output(&proc_res.stdout, &self.props.normalize_stdout);
@@ -2554,7 +2557,7 @@ impl<'test> TestCx<'test> {
                 self.fatal_proc_rec("test run failed!", &proc_res);
             }
         }
-        if !explicit {
+        if !explicit && self.config.compare_mode.is_none() {
             if !expected_errors.is_empty() || !proc_res.status.success() {
                 // "// error-pattern" comments
                 self.check_expected_errors(expected_errors, &proc_res);
@@ -2797,19 +2800,32 @@ impl<'test> TestCx<'test> {
         normalized
     }
 
-    fn expected_output_path(&self, kind: &str) -> PathBuf {
-        expected_output_path(&self.testpaths, self.revision, kind)
-    }
+    fn load_expected_output(&self, kind: &str) -> String {
+        let mut path = expected_output_path(&self.testpaths,
+                                            self.revision,
+                                            &self.config.compare_mode,
+                                            kind);
 
-    fn load_expected_output(&self, path: &Path) -> String {
-        if !path.exists() {
-            return String::new();
+        if !path.exists() && self.config.compare_mode.is_some() {
+            // fallback!
+            path = expected_output_path(&self.testpaths, self.revision, &None, kind);
         }
 
+        if path.exists() {
+            match self.load_expected_output_from_path(&path) {
+                Ok(x) => x,
+                Err(x) => self.fatal(&x),
+            }
+        } else {
+            String::new()
+        }
+    }
+
+    fn load_expected_output_from_path(&self, path: &Path) -> Result<String, String> {
         let mut result = String::new();
         match File::open(path).and_then(|mut f| f.read_to_string(&mut result)) {
-            Ok(_) => result,
-            Err(e) => self.fatal(&format!(
+            Ok(_) => Ok(result),
+            Err(e) => Err(format!(
                 "failed to load expected output from `{}`: {}",
                 path.display(),
                 e

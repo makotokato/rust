@@ -14,11 +14,11 @@ use hir::def_id::{CrateNum, DefId, DefIndex};
 use hir::def::{Def, Export};
 use hir::{self, TraitCandidate, ItemLocalId, TransFnAttrs};
 use hir::svh::Svh;
-use infer::canonical::{Canonical, QueryResult};
+use infer::canonical::{self, Canonical};
 use lint;
 use middle::borrowck::BorrowCheckResult;
 use middle::cstore::{ExternCrate, LinkagePreference, NativeLibrary,
-                     ExternBodyNestedBodies};
+                     ExternBodyNestedBodies, ForeignModule};
 use middle::cstore::{NativeLibraryKind, DepKind, CrateSource, ExternConstBody};
 use middle::privacy::AccessLevels;
 use middle::reachable::ReachableSet;
@@ -66,6 +66,10 @@ mod plumbing;
 use self::plumbing::*;
 pub use self::plumbing::force_from_dep_node;
 
+mod job;
+pub use self::job::{QueryJob, QueryInfo};
+use self::job::QueryResult;
+
 mod keys;
 pub use self::keys::Key;
 
@@ -98,6 +102,7 @@ define_maps! { <'tcx>
     /// associated generics and predicates.
     [] fn generics_of: GenericsOfItem(DefId) -> &'tcx ty::Generics,
     [] fn predicates_of: PredicatesOfItem(DefId) -> ty::GenericPredicates<'tcx>,
+    [] fn explicit_predicates_of: PredicatesOfItem(DefId) -> ty::GenericPredicates<'tcx>,
 
     /// Maps from the def-id of a trait to the list of
     /// super-predicates. This is a subset of the full list of
@@ -135,7 +140,11 @@ define_maps! { <'tcx>
     [] fn variances_of: ItemVariances(DefId) -> Lrc<Vec<ty::Variance>>,
 
     /// Maps from def-id of a type to its (inferred) outlives.
-    [] fn inferred_outlives_of: InferredOutlivesOf(DefId) -> Vec<ty::Predicate<'tcx>>,
+    [] fn inferred_outlives_of: InferredOutlivesOf(DefId) -> Lrc<Vec<ty::Predicate<'tcx>>>,
+
+    /// Maps from def-id of a type to its (inferred) outlives.
+    [] fn inferred_outlives_crate: InferredOutlivesCrate(CrateNum)
+        -> Lrc<ty::CratePredicatesMap<'tcx>>,
 
     /// Maps from an impl/trait def-id to a list of the def-ids of its items
     [] fn associated_item_def_ids: AssociatedItemDefIds(DefId) -> Lrc<Vec<DefId>>,
@@ -299,6 +308,10 @@ define_maps! { <'tcx>
 
     [] fn impl_defaultness: ImplDefaultness(DefId) -> hir::Defaultness,
 
+    [] fn check_item_well_formed: CheckItemWellFormed(DefId) -> (),
+    [] fn check_trait_item_well_formed: CheckTraitItemWellFormed(DefId) -> (),
+    [] fn check_impl_item_well_formed: CheckImplItemWellFormed(DefId) -> (),
+
     // The DefIds of all non-generic functions and statics in the given crate
     // that can be reached from outside the crate.
     //
@@ -311,22 +324,34 @@ define_maps! { <'tcx>
     //
     // Does not include external symbols that don't have a corresponding DefId,
     // like the compiler-generated `main` function and so on.
-    [] fn reachable_non_generics: ReachableNonGenerics(CrateNum) -> Lrc<DefIdSet>,
+    [] fn reachable_non_generics: ReachableNonGenerics(CrateNum)
+        -> Lrc<DefIdMap<SymbolExportLevel>>,
     [] fn is_reachable_non_generic: IsReachableNonGeneric(DefId) -> bool,
+    [] fn is_unreachable_local_definition: IsUnreachableLocalDefinition(DefId) -> bool,
 
+    [] fn upstream_monomorphizations: UpstreamMonomorphizations(CrateNum)
+        -> Lrc<DefIdMap<Lrc<FxHashMap<&'tcx Substs<'tcx>, CrateNum>>>>,
+    [] fn upstream_monomorphizations_for: UpstreamMonomorphizationsFor(DefId)
+        -> Option<Lrc<FxHashMap<&'tcx Substs<'tcx>, CrateNum>>>,
 
     [] fn native_libraries: NativeLibraries(CrateNum) -> Lrc<Vec<NativeLibrary>>,
+
+    [] fn foreign_modules: ForeignModules(CrateNum) -> Lrc<Vec<ForeignModule>>,
+
     [] fn plugin_registrar_fn: PluginRegistrarFn(CrateNum) -> Option<DefId>,
     [] fn derive_registrar_fn: DeriveRegistrarFn(CrateNum) -> Option<DefId>,
     [] fn crate_disambiguator: CrateDisambiguator(CrateNum) -> CrateDisambiguator,
     [] fn crate_hash: CrateHash(CrateNum) -> Svh,
     [] fn original_crate_name: OriginalCrateName(CrateNum) -> Symbol,
+    [] fn extra_filename: ExtraFileName(CrateNum) -> String,
 
     [] fn implementations_of_trait: implementations_of_trait_node((CrateNum, DefId))
         -> Lrc<Vec<DefId>>,
     [] fn all_trait_implementations: AllTraitImplementations(CrateNum)
         -> Lrc<Vec<DefId>>,
 
+    [] fn dllimport_foreign_items: DllimportForeignItems(CrateNum)
+        -> Lrc<FxHashSet<DefId>>,
     [] fn is_dllimport_foreign_item: IsDllimportForeignItem(DefId) -> bool,
     [] fn is_statically_included_foreign_item: IsStaticallyIncludedForeignItem(DefId) -> bool,
     [] fn native_library_kind: NativeLibraryKind(DefId)
@@ -366,20 +391,21 @@ define_maps! { <'tcx>
     [] fn stability_index: stability_index_node(CrateNum) -> Lrc<stability::Index<'tcx>>,
     [] fn all_crate_nums: all_crate_nums_node(CrateNum) -> Lrc<Vec<CrateNum>>,
 
+    /// A vector of every trait accessible in the whole crate
+    /// (i.e. including those from subcrates). This is used only for
+    /// error reporting.
+    [] fn all_traits: all_traits_node(CrateNum) -> Lrc<Vec<DefId>>,
+
     [] fn exported_symbols: ExportedSymbols(CrateNum)
-        -> Arc<Vec<(ExportedSymbol, SymbolExportLevel)>>,
+        -> Arc<Vec<(ExportedSymbol<'tcx>, SymbolExportLevel)>>,
     [] fn collect_and_partition_translation_items:
         collect_and_partition_translation_items_node(CrateNum)
         -> (Arc<DefIdSet>, Arc<Vec<Arc<CodegenUnit<'tcx>>>>),
-    [] fn symbol_export_level: GetSymbolExportLevel(DefId) -> SymbolExportLevel,
     [] fn is_translated_item: IsTranslatedItem(DefId) -> bool,
     [] fn codegen_unit: CodegenUnit(InternedString) -> Arc<CodegenUnit<'tcx>>,
     [] fn compile_codegen_unit: CompileCodegenUnit(InternedString) -> Stats,
     [] fn output_filenames: output_filenames_node(CrateNum)
         -> Arc<OutputFilenames>,
-
-    [] fn has_copy_closures: HasCopyClosures(CrateNum) -> bool,
-    [] fn has_clone_closures: HasCloneClosures(CrateNum) -> bool,
 
     // Erases regions from `ty` to yield a new type.
     // Normally you would just use `tcx.erase_regions(&value)`,
@@ -390,7 +416,7 @@ define_maps! { <'tcx>
     [] fn normalize_projection_ty: NormalizeProjectionTy(
         CanonicalProjectionGoal<'tcx>
     ) -> Result<
-        Lrc<Canonical<'tcx, QueryResult<'tcx, NormalizationResult<'tcx>>>>,
+        Lrc<Canonical<'tcx, canonical::QueryResult<'tcx, NormalizationResult<'tcx>>>>,
         NoSolution,
     >,
 
@@ -403,7 +429,7 @@ define_maps! { <'tcx>
     [] fn dropck_outlives: DropckOutlives(
         CanonicalTyGoal<'tcx>
     ) -> Result<
-        Lrc<Canonical<'tcx, QueryResult<'tcx, DropckOutlivesResult<'tcx>>>>,
+        Lrc<Canonical<'tcx, canonical::QueryResult<'tcx, DropckOutlivesResult<'tcx>>>>,
         NoSolution,
     >,
 
@@ -420,6 +446,10 @@ define_maps! { <'tcx>
     [] fn features_query: features_node(CrateNum) -> Lrc<feature_gate::Features>,
 
     [] fn program_clauses_for: ProgramClausesFor(DefId) -> Lrc<Vec<Clause<'tcx>>>,
+
+    [] fn wasm_custom_sections: WasmCustomSections(CrateNum) -> Lrc<Vec<DefId>>,
+    [] fn wasm_import_module_map: WasmImportModuleMap(CrateNum)
+        -> Lrc<FxHashMap<DefId, String>>,
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -553,6 +583,10 @@ fn stability_index_node<'tcx>(_: CrateNum) -> DepConstructor<'tcx> {
 
 fn all_crate_nums_node<'tcx>(_: CrateNum) -> DepConstructor<'tcx> {
     DepConstructor::AllCrateNums
+}
+
+fn all_traits_node<'tcx>(_: CrateNum) -> DepConstructor<'tcx> {
+    DepConstructor::AllTraits
 }
 
 fn collect_and_partition_translation_items_node<'tcx>(_: CrateNum) -> DepConstructor<'tcx> {

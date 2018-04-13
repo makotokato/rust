@@ -26,7 +26,7 @@ use print::pp::{self, Breaks};
 use print::pp::Breaks::{Consistent, Inconsistent};
 use ptr::P;
 use std_inject;
-use symbol::{Symbol, keywords};
+use symbol::keywords;
 use syntax_pos::{DUMMY_SP, FileName};
 use tokenstream::{self, TokenStream, TokenTree};
 
@@ -94,20 +94,20 @@ pub fn print_crate<'a>(cm: &'a CodeMap,
                        is_expanded: bool) -> io::Result<()> {
     let mut s = State::new_from_input(cm, sess, filename, input, out, ann, is_expanded);
 
-    if is_expanded && !std_inject::injected_crate_name().is_none() {
+    if is_expanded && std_inject::injected_crate_name().is_some() {
         // We need to print `#![no_std]` (and its feature gate) so that
         // compiling pretty-printed source won't inject libstd again.
         // However we don't want these attributes in the AST because
         // of the feature gate, so we fake them up here.
 
         // #![feature(prelude_import)]
-        let prelude_import_meta = attr::mk_list_word_item(Symbol::intern("prelude_import"));
-        let list = attr::mk_list_item(Symbol::intern("feature"), vec![prelude_import_meta]);
+        let pi_nested = attr::mk_nested_word_item(ast::Ident::from_str("prelude_import"));
+        let list = attr::mk_list_item(DUMMY_SP, ast::Ident::from_str("feature"), vec![pi_nested]);
         let fake_attr = attr::mk_attr_inner(DUMMY_SP, attr::mk_attr_id(), list);
         s.print_attribute(&fake_attr)?;
 
         // #![no_std]
-        let no_std_meta = attr::mk_word_item(Symbol::intern("no_std"));
+        let no_std_meta = attr::mk_word_item(ast::Ident::from_str("no_std"));
         let fake_attr = attr::mk_attr_inner(DUMMY_SP, attr::mk_attr_id(), no_std_meta);
         s.print_attribute(&fake_attr)?;
     }
@@ -250,7 +250,8 @@ pub fn token_to_string(tok: &Token) -> String {
         }
 
         /* Name components */
-        token::Ident(s)             => s.to_string(),
+        token::Ident(s, false)      => s.to_string(),
+        token::Ident(s, true)       => format!("r#{}", s),
         token::Lifetime(s)          => s.to_string(),
 
         /* Other */
@@ -269,7 +270,9 @@ pub fn token_to_string(tok: &Token) -> String {
             token::NtBlock(ref e)       => block_to_string(e),
             token::NtStmt(ref e)        => stmt_to_string(e),
             token::NtPat(ref e)         => pat_to_string(e),
-            token::NtIdent(ref e)       => ident_to_string(e.node),
+            token::NtIdent(e, false)    => ident_to_string(e),
+            token::NtIdent(e, true)     => format!("r#{}", ident_to_string(e)),
+            token::NtLifetime(e)        => ident_to_string(e),
             token::NtTT(ref tree)       => tt_to_string(tree.clone()),
             token::NtArm(ref e)         => arm_to_string(e),
             token::NtImplItem(ref e)    => impl_item_to_string(e),
@@ -278,7 +281,7 @@ pub fn token_to_string(tok: &Token) -> String {
             token::NtWhereClause(ref e) => where_clause_to_string(e),
             token::NtArg(ref e)         => arg_to_string(e),
             token::NtVis(ref e)         => vis_to_string(e),
-            token::NtLifetime(ref e)    => lifetime_to_string(e),
+            token::NtForeignItem(ref e) => foreign_item_to_string(e),
         }
     }
 }
@@ -418,6 +421,10 @@ pub fn arg_to_string(arg: &ast::Arg) -> String {
 
 pub fn mac_to_string(arg: &ast::Mac) -> String {
     to_string(|s| s.print_mac(arg, ::parse::token::Paren))
+}
+
+pub fn foreign_item_to_string(arg: &ast::ForeignItem) -> String {
+    to_string(|s| s.print_foreign_item(arg))
 }
 
 pub fn visibility_qualified(vis: &ast::Visibility, s: &str) -> String {
@@ -732,11 +739,11 @@ pub trait PrintState<'a> {
                     if i > 0 {
                         self.writer().word("::")?
                     }
-                    if segment.identifier.name != keywords::CrateRoot.name() &&
-                       segment.identifier.name != keywords::DollarCrate.name() {
-                        self.writer().word(&segment.identifier.name.as_str())?;
-                    } else if segment.identifier.name == keywords::DollarCrate.name() {
-                        self.print_dollar_crate(segment.identifier.ctxt)?;
+                    if segment.ident.name != keywords::CrateRoot.name() &&
+                       segment.ident.name != keywords::DollarCrate.name() {
+                        self.writer().word(&segment.ident.name.as_str())?;
+                    } else if segment.ident.name == keywords::DollarCrate.name() {
+                        self.print_dollar_crate(segment.ident.span.ctxt())?;
                     }
                 }
                 self.writer().space()?;
@@ -761,15 +768,15 @@ pub trait PrintState<'a> {
         self.ibox(INDENT_UNIT)?;
         match item.node {
             ast::MetaItemKind::Word => {
-                self.writer().word(&item.name.as_str())?;
+                self.writer().word(&item.ident.name.as_str())?;
             }
             ast::MetaItemKind::NameValue(ref value) => {
-                self.word_space(&item.name.as_str())?;
+                self.word_space(&item.ident.name.as_str())?;
                 self.word_space("=")?;
                 self.print_literal(value)?;
             }
             ast::MetaItemKind::List(ref items) => {
-                self.writer().word(&item.name.as_str())?;
+                self.writer().word(&item.ident.name.as_str())?;
                 self.popen()?;
                 self.commasep(Consistent,
                               &items[..],
@@ -1124,6 +1131,10 @@ impl<'a> State<'a> {
                 self.s.word(";")?;
                 self.end()?; // end the head-ibox
                 self.end() // end the outer cbox
+            }
+            ast::ForeignItemKind::Macro(ref m) => {
+                self.print_mac(m, token::Paren)?;
+                self.s.word(";")
             }
         }
     }
@@ -1529,7 +1540,7 @@ impl<'a> State<'a> {
     pub fn print_variant(&mut self, v: &ast::Variant) -> io::Result<()> {
         self.head("")?;
         let generics = ast::Generics::default();
-        self.print_struct(&v.node.data, &generics, v.node.name, v.span, false)?;
+        self.print_struct(&v.node.data, &generics, v.node.ident, v.span, false)?;
         match v.node.disr_expr {
             Some(ref d) => {
                 self.s.space()?;
@@ -1875,16 +1886,6 @@ impl<'a> State<'a> {
         Ok(())
     }
 
-    fn print_expr_in_place(&mut self,
-                           place: &ast::Expr,
-                           expr: &ast::Expr) -> io::Result<()> {
-        let prec = AssocOp::Inplace.precedence() as i8;
-        self.print_expr_maybe_paren(place, prec + 1)?;
-        self.s.space()?;
-        self.word_space("<-")?;
-        self.print_expr_maybe_paren(expr, prec)
-    }
-
     fn print_expr_vec(&mut self, exprs: &[P<ast::Expr>],
                       attrs: &[Attribute]) -> io::Result<()> {
         self.ibox(INDENT_UNIT)?;
@@ -1923,7 +1924,7 @@ impl<'a> State<'a> {
             |s, field| {
                 s.ibox(INDENT_UNIT)?;
                 if !field.is_shorthand {
-                    s.print_ident(field.ident.node)?;
+                    s.print_ident(field.ident)?;
                     s.word_space(":")?;
                 }
                 s.print_expr(&field.expr)?;
@@ -1965,8 +1966,7 @@ impl<'a> State<'a> {
                        args: &[P<ast::Expr>]) -> io::Result<()> {
         let prec =
             match func.node {
-                ast::ExprKind::Field(..) |
-                ast::ExprKind::TupField(..) => parser::PREC_FORCE_PAREN,
+                ast::ExprKind::Field(..) => parser::PREC_FORCE_PAREN,
                 _ => parser::PREC_POSTFIX,
             };
 
@@ -1980,7 +1980,7 @@ impl<'a> State<'a> {
         let base_args = &args[1..];
         self.print_expr_maybe_paren(&args[0], parser::PREC_POSTFIX)?;
         self.s.word(".")?;
-        self.print_ident(segment.identifier)?;
+        self.print_ident(segment.ident)?;
         if let Some(ref parameters) = segment.parameters {
             self.print_path_parameters(parameters, true)?;
         }
@@ -2053,9 +2053,6 @@ impl<'a> State<'a> {
             ast::ExprKind::Box(ref expr) => {
                 self.word_space("box")?;
                 self.print_expr_maybe_paren(expr, parser::PREC_PREFIX)?;
-            }
-            ast::ExprKind::InPlace(ref place, ref expr) => {
-                self.print_expr_in_place(place, expr)?;
             }
             ast::ExprKind::Array(ref exprs) => {
                 self.print_expr_vec(&exprs[..], attrs)?;
@@ -2200,15 +2197,10 @@ impl<'a> State<'a> {
                 self.word_space("=")?;
                 self.print_expr_maybe_paren(rhs, prec)?;
             }
-            ast::ExprKind::Field(ref expr, id) => {
+            ast::ExprKind::Field(ref expr, ident) => {
                 self.print_expr_maybe_paren(expr, parser::PREC_POSTFIX)?;
                 self.s.word(".")?;
-                self.print_ident(id.node)?;
-            }
-            ast::ExprKind::TupField(ref expr, id) => {
-                self.print_expr_maybe_paren(expr, parser::PREC_POSTFIX)?;
-                self.s.word(".")?;
-                self.print_usize(id.node)?;
+                self.print_ident(ident)?;
             }
             ast::ExprKind::Index(ref expr, ref index) => {
                 self.print_expr_maybe_paren(expr, parser::PREC_POSTFIX)?;
@@ -2371,7 +2363,11 @@ impl<'a> State<'a> {
     }
 
     pub fn print_ident(&mut self, ident: ast::Ident) -> io::Result<()> {
-        self.s.word(&ident.name.as_str())?;
+        if token::is_raw_guess(ident) {
+            self.s.word(&format!("r#{}", ident))?;
+        } else {
+            self.s.word(&ident.name.as_str())?;
+        }
         self.ann.post(self, NodeIdent(&ident))
     }
 
@@ -2415,14 +2411,14 @@ impl<'a> State<'a> {
                           colons_before_params: bool)
                           -> io::Result<()>
     {
-        if segment.identifier.name != keywords::CrateRoot.name() &&
-           segment.identifier.name != keywords::DollarCrate.name() {
-            self.print_ident(segment.identifier)?;
+        if segment.ident.name != keywords::CrateRoot.name() &&
+           segment.ident.name != keywords::DollarCrate.name() {
+            self.print_ident(segment.ident)?;
             if let Some(ref parameters) = segment.parameters {
                 self.print_path_parameters(parameters, colons_before_params)?;
             }
-        } else if segment.identifier.name == keywords::DollarCrate.name() {
-            self.print_dollar_crate(segment.identifier.ctxt)?;
+        } else if segment.ident.name == keywords::DollarCrate.name() {
+            self.print_dollar_crate(segment.ident.span.ctxt())?;
         }
         Ok(())
     }
@@ -2444,7 +2440,7 @@ impl<'a> State<'a> {
         self.s.word(">")?;
         self.s.word("::")?;
         let item_segment = path.segments.last().unwrap();
-        self.print_ident(item_segment.identifier)?;
+        self.print_ident(item_segment.ident)?;
         match item_segment.parameters {
             Some(ref parameters) => self.print_path_parameters(parameters, colons_before_params),
             None => Ok(()),
@@ -2524,7 +2520,7 @@ impl<'a> State<'a> {
          is that it doesn't matter */
         match pat.node {
             PatKind::Wild => self.s.word("_")?,
-            PatKind::Ident(binding_mode, ref path1, ref sub) => {
+            PatKind::Ident(binding_mode, ident, ref sub) => {
                 match binding_mode {
                     ast::BindingMode::ByRef(mutbl) => {
                         self.word_nbsp("ref")?;
@@ -2535,7 +2531,7 @@ impl<'a> State<'a> {
                         self.word_nbsp("mut")?;
                     }
                 }
-                self.print_ident(path1.node)?;
+                self.print_ident(ident)?;
                 if let Some(ref p) = *sub {
                     self.s.word("@")?;
                     self.print_pat(p)?;
@@ -2997,7 +2993,7 @@ impl<'a> State<'a> {
                     self.print_explicit_self(&eself)?;
                 } else {
                     let invalid = if let PatKind::Ident(_, ident, _) = input.pat.node {
-                        ident.node.name == keywords::Invalid.name()
+                        ident.name == keywords::Invalid.name()
                     } else {
                         false
                     };
@@ -3192,7 +3188,7 @@ mod tests {
             let ident = ast::Ident::from_str("principal_skinner");
 
             let var = codemap::respan(syntax_pos::DUMMY_SP, ast::Variant_ {
-                name: ident,
+                ident,
                 attrs: Vec::new(),
                 // making this up as I go.... ?
                 data: ast::VariantData::Unit(ast::DUMMY_NODE_ID),

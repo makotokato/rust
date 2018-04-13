@@ -19,22 +19,16 @@
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://www.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![deny(warnings)]
 
 #![feature(collections_range)]
 #![feature(nonzero)]
 #![feature(unboxed_closures)]
 #![feature(fn_traits)]
 #![feature(unsize)]
-#![feature(i128_type)]
-#![feature(i128)]
-#![feature(conservative_impl_trait)]
 #![feature(specialization)]
 #![feature(optin_builtin_traits)]
-#![feature(underscore_lifetimes)]
 #![feature(macro_vis_matcher)]
 #![feature(allow_internal_unstable)]
-#![feature(universal_impl_trait)]
 
 #![cfg_attr(unix, feature(libc))]
 #![cfg_attr(test, feature(test))]
@@ -75,6 +69,14 @@ pub mod control_flow_graph;
 pub mod flock;
 pub mod sync;
 pub mod owning_ref;
+
+pub struct OnDrop<F: Fn()>(pub F);
+
+impl<F: Fn()> Drop for OnDrop<F> {
+      fn drop(&mut self) {
+            (self.0)();
+      }
+}
 
 // See comments in src/librustc/lib.rs
 #[doc(hidden)]

@@ -39,24 +39,17 @@
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![deny(warnings)]
 
 #![feature(box_patterns)]
 #![feature(box_syntax)]
-#![feature(conservative_impl_trait)]
 #![feature(const_fn)]
-#![feature(copy_closures, clone_closures)]
 #![feature(core_intrinsics)]
 #![feature(drain_filter)]
 #![feature(dyn_trait)]
 #![feature(entry_or_default)]
 #![feature(from_ref)]
 #![feature(fs_read_write)]
-#![feature(i128)]
-#![feature(i128_type)]
-#![cfg_attr(stage0, feature(inclusive_range_syntax))]
 #![cfg_attr(windows, feature(libc))]
-#![feature(match_default_bindings)]
 #![feature(macro_lifetime_matcher)]
 #![feature(macro_vis_matcher)]
 #![feature(exhaustive_patterns)]
@@ -67,10 +60,9 @@
 #![feature(refcell_replace_swap)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(slice_patterns)]
+#![feature(slice_sort_by_cached_key)]
 #![feature(specialization)]
 #![feature(unboxed_closures)]
-#![feature(underscore_lifetimes)]
-#![feature(universal_impl_trait)]
 #![feature(trace_macros)]
 #![feature(trusted_len)]
 #![feature(catch_expr)]
@@ -157,6 +149,7 @@ pub mod traits;
 pub mod ty;
 
 pub mod util {
+    pub mod captures;
     pub mod common;
     pub mod ppaux;
     pub mod nodemap;

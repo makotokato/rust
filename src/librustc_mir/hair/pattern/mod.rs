@@ -466,7 +466,7 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
                 }
             }
 
-            PatKind::Binding(_, id, ref ident, ref sub) => {
+            PatKind::Binding(_, id, ref name, ref sub) => {
                 let var_ty = self.tables.node_id_to_type(pat.hir_id);
                 let region = match var_ty.sty {
                     ty::TyRef(r, _) => Some(r),
@@ -493,14 +493,14 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
                     if let ty::TyRef(_, mt) = ty.sty {
                         ty = mt.ty;
                     } else {
-                        bug!("`ref {}` has wrong type {}", ident.node, ty);
+                        bug!("`ref {}` has wrong type {}", name.node, ty);
                     }
                 }
 
                 PatternKind::Binding {
                     mutability,
                     mode,
-                    name: ident.node,
+                    name: name.node,
                     var: id,
                     ty: var_ty,
                     subpattern: self.lower_opt_pattern(sub),
@@ -528,28 +528,12 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
 
             PatKind::Struct(ref qpath, ref fields, _) => {
                 let def = self.tables.qpath_def(qpath, pat.hir_id);
-                let adt_def = match ty.sty {
-                    ty::TyAdt(adt_def, _) => adt_def,
-                    _ => {
-                        span_bug!(
-                            pat.span,
-                            "struct pattern not applied to an ADT");
-                    }
-                };
-                let variant_def = adt_def.variant_of_def(def);
-
                 let subpatterns =
                     fields.iter()
                           .map(|field| {
-                              let index = variant_def.index_of_field_named(field.node.name);
-                              let index = index.unwrap_or_else(|| {
-                                  span_bug!(
-                                      pat.span,
-                                      "no field with name {:?}",
-                                      field.node.name);
-                              });
                               FieldPattern {
-                                  field: Field::new(index),
+                                  field: Field::new(self.tcx.field_index(field.node.id,
+                                                                         self.tables)),
                                   pattern: self.lower_pattern(&field.node.pat),
                               }
                           })
@@ -851,13 +835,38 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
             ty::TyAdt(adt_def, substs) if adt_def.is_enum() => {
                 match cv.val {
                     ConstVal::Value(val) => {
-                        let discr = const_discr(
+                        let discr_val = const_discr(
                             self.tcx, self.param_env, instance, val, cv.ty
-                        ).unwrap();
-                        let variant_index = adt_def
-                            .discriminants(self.tcx)
-                            .position(|var| var.val == discr)
-                            .unwrap();
+                        ).expect("const_discr failed");
+                        let layout = self
+                            .tcx
+                            .layout_of(self.param_env.and(cv.ty))
+                            .expect("layout of enum not available");
+                        let variant_index = match layout.variants {
+                            ty::layout::Variants::Single { index } => index,
+                            ty::layout::Variants::Tagged { ref discr, .. } => {
+                                // raw discriminants for enums are isize or bigger during
+                                // their computation, but later shrunk to the smallest possible
+                                // representation
+                                let size = discr.value.size(self.tcx).bits();
+                                let amt = 128 - size;
+                                adt_def
+                                    .discriminants(self.tcx)
+                                    .position(|var| ((var.val << amt) >> amt) == discr_val)
+                                    .unwrap_or_else(|| {
+                                        bug!("discriminant {} not found in {:#?}",
+                                            discr_val,
+                                            adt_def
+                                                .discriminants(self.tcx)
+                                                .collect::<Vec<_>>(),
+                                            );
+                                    })
+                            }
+                            ty::layout::Variants::NicheFilling { .. } => {
+                                assert_eq!(discr_val as usize as u128, discr_val);
+                                discr_val as usize
+                            },
+                        };
                         let subpatterns = adt_subpatterns(
                             adt_def.variants[variant_index].fields.len(),
                             Some(variant_index),

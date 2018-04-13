@@ -42,6 +42,7 @@ use dataflow::indexes::BorrowIndex;
 use dataflow::move_paths::{IllegalMoveOriginKind, MoveError};
 use dataflow::move_paths::{HasMoveData, LookupResult, MoveData, MovePathIndex};
 use util::borrowck_errors::{BorrowckErrors, Origin};
+use util::collect_writes::FindAssignments;
 
 use std::iter;
 
@@ -239,6 +240,7 @@ fn do_mir_borrowck<'a, 'gcx, 'tcx>(
         },
         access_place_error_reported: FxHashSet(),
         reservation_error_reported: FxHashSet(),
+        moved_error_reported: FxHashSet(),
         nonlexical_regioncx: opt_regioncx,
         nonlexical_cause_info: None,
     };
@@ -285,6 +287,9 @@ pub struct MirBorrowckCtxt<'cx, 'gcx: 'tcx, 'tcx: 'cx> {
     /// but it is currently inconvenient to track down the BorrowIndex
     /// at the time we detect and report a reservation error.
     reservation_error_reported: FxHashSet<Place<'tcx>>,
+    /// This field keeps track of errors reported in the checking of moved variables,
+    /// so that we don't report report seemingly duplicate errors.
+    moved_error_reported: FxHashSet<Place<'tcx>>,
     /// Non-lexical region inference context, if NLL is enabled.  This
     /// contains the results from region inference and lets us e.g.
     /// find out which CFG points are contained in each borrow region.
@@ -368,7 +373,7 @@ impl<'cx, 'gcx, 'tcx> DataflowResultsConsumer<'cx, 'tcx> for MirBorrowckCtxt<'cx
                             LocalMutationIsAllowed::No,
                             flow_state,
                         );
-                        self.check_if_path_is_moved(
+                        self.check_if_path_or_subpath_is_moved(
                             context,
                             InitializationRequiringAction::Use,
                             (output, span),
@@ -392,11 +397,13 @@ impl<'cx, 'gcx, 'tcx> DataflowResultsConsumer<'cx, 'tcx> for MirBorrowckCtxt<'cx
                 // ignored when consuming results (update to
                 // flow_state already handled).
             }
-            StatementKind::Nop | StatementKind::Validate(..) | StatementKind::StorageLive(..) => {
-                // `Nop`, `Validate`, and `StorageLive` are irrelevant
+            StatementKind::Nop |
+            StatementKind::UserAssertTy(..) |
+            StatementKind::Validate(..) |
+            StatementKind::StorageLive(..) => {
+                // `Nop`, `UserAssertTy`, `Validate`, and `StorageLive` are irrelevant
                 // to borrow check.
             }
-
             StatementKind::StorageDead(local) => {
                 self.access_place(
                     ContextKind::StorageDead.new(location),
@@ -963,7 +970,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         // Write of P[i] or *P, or WriteAndRead of any P, requires P init'd.
         match mode {
             MutateMode::WriteAndRead => {
-                self.check_if_path_is_moved(
+                self.check_if_path_or_subpath_is_moved(
                     context,
                     InitializationRequiringAction::Update,
                     place_span,
@@ -1023,7 +1030,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     flow_state,
                 );
 
-                self.check_if_path_is_moved(
+                self.check_if_path_or_subpath_is_moved(
                     context,
                     InitializationRequiringAction::Borrow,
                     (place, span),
@@ -1051,7 +1058,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     LocalMutationIsAllowed::No,
                     flow_state,
                 );
-                self.check_if_path_is_moved(
+                self.check_if_path_or_subpath_is_moved(
                     context,
                     InitializationRequiringAction::Use,
                     (place, span),
@@ -1098,7 +1105,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                 );
 
                 // Finally, check if path was already moved.
-                self.check_if_path_is_moved(
+                self.check_if_path_or_subpath_is_moved(
                     context,
                     InitializationRequiringAction::Use,
                     (place, span),
@@ -1116,7 +1123,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                 );
 
                 // Finally, check if path was already moved.
-                self.check_if_path_is_moved(
+                self.check_if_path_or_subpath_is_moved(
                     context,
                     InitializationRequiringAction::Use,
                     (place, span),
@@ -1267,7 +1274,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     LocalMutationIsAllowed::No,
                     flow_state,
                 );
-                // We do not need to call `check_if_path_is_moved`
+                // We do not need to call `check_if_path_or_subpath_is_moved`
                 // again, as we already called it when we made the
                 // initial reservation.
             }
@@ -1302,7 +1309,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         }
     }
 
-    fn check_if_path_is_moved(
+    fn check_if_full_path_is_moved(
         &mut self,
         context: Context,
         desired_action: InitializationRequiringAction,
@@ -1320,18 +1327,17 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         //
         // 1. Move of `a.b.c`, use of `a.b.c`
         // 2. Move of `a.b.c`, use of `a.b.c.d` (without first reinitializing `a.b.c.d`)
-        // 3. Move of `a.b.c`, use of `a` or `a.b`
-        // 4. Uninitialized `(a.b.c: &_)`, use of `*a.b.c`; note that with
+        // 3. Uninitialized `(a.b.c: &_)`, use of `*a.b.c`; note that with
         //    partial initialization support, one might have `a.x`
         //    initialized but not `a.b`.
         //
         // OK scenarios:
         //
-        // 5. Move of `a.b.c`, use of `a.b.d`
-        // 6. Uninitialized `a.x`, initialized `a.b`, use of `a.b`
-        // 7. Copied `(a.b: &_)`, use of `*(a.b).c`; note that `a.b`
+        // 4. Move of `a.b.c`, use of `a.b.d`
+        // 5. Uninitialized `a.x`, initialized `a.b`, use of `a.b`
+        // 6. Copied `(a.b: &_)`, use of `*(a.b).c`; note that `a.b`
         //    must have been initialized for the use to be sound.
-        // 8. Move of `a.b.c` then reinit of `a.b.c.d`, use of `a.b.c.d`
+        // 7. Move of `a.b.c` then reinit of `a.b.c.d`, use of `a.b.c.d`
 
         // The dataflow tracks shallow prefixes distinctly (that is,
         // field-accesses on P distinctly from P itself), in order to
@@ -1350,9 +1356,9 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         // have a MovePath, that should capture the initialization
         // state for the place scenario.
         //
-        // This code covers scenarios 1, 2, and 4.
+        // This code covers scenarios 1, 2, and 3.
 
-        debug!("check_if_path_is_moved part1 place: {:?}", place);
+        debug!("check_if_full_path_is_moved place: {:?}", place);
         match self.move_path_closest_to(place) {
             Ok(mpi) => {
                 if maybe_uninits.contains(&mpi) {
@@ -1372,9 +1378,41 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
               // ancestors; dataflow recurs on children when parents
               // move (to support partial (re)inits).
               //
-              // (I.e. querying parents breaks scenario 8; but may want
+              // (I.e. querying parents breaks scenario 7; but may want
               // to do such a query based on partial-init feature-gate.)
         }
+    }
+
+    fn check_if_path_or_subpath_is_moved(
+        &mut self,
+        context: Context,
+        desired_action: InitializationRequiringAction,
+        place_span: (&Place<'tcx>, Span),
+        flow_state: &Flows<'cx, 'gcx, 'tcx>,
+    ) {
+        // FIXME: analogous code in check_loans first maps `place` to
+        // its base_path ... but is that what we want here?
+        let place = self.base_path(place_span.0);
+
+        let maybe_uninits = &flow_state.uninits;
+        let curr_move_outs = &flow_state.move_outs;
+
+        // Bad scenarios:
+        //
+        // 1. Move of `a.b.c`, use of `a` or `a.b`
+        //    partial initialization support, one might have `a.x`
+        //    initialized but not `a.b`.
+        // 2. All bad scenarios from `check_if_full_path_is_moved`
+        //
+        // OK scenarios:
+        //
+        // 3. Move of `a.b.c`, use of `a.b.d`
+        // 4. Uninitialized `a.x`, initialized `a.b`, use of `a.b`
+        // 5. Copied `(a.b: &_)`, use of `*(a.b).c`; note that `a.b`
+        //    must have been initialized for the use to be sound.
+        // 6. Move of `a.b.c` then reinit of `a.b.c.d`, use of `a.b.c.d`
+
+        self.check_if_full_path_is_moved(context, desired_action, place_span, flow_state);
 
         // A move of any shallow suffix of `place` also interferes
         // with an attempt to use `place`. This is scenario 3 above.
@@ -1382,8 +1420,10 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         // (Distinct from handling of scenarios 1+2+4 above because
         // `place` does not interfere with suffixes of its prefixes,
         // e.g. `a.b.c` does not interfere with `a.b.d`)
+        //
+        // This code covers scenario 1.
 
-        debug!("check_if_path_is_moved part2 place: {:?}", place);
+        debug!("check_if_path_or_subpath_is_moved place: {:?}", place);
         if let Some(mpi) = self.move_path_for_place(place) {
             if let Some(child_mpi) = maybe_uninits.has_any_child_of(mpi) {
                 self.report_use_of_moved_or_uninitialized(
@@ -1443,7 +1483,8 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         (place, span): (&Place<'tcx>, Span),
         flow_state: &Flows<'cx, 'gcx, 'tcx>,
     ) {
-        // recur down place; dispatch to check_if_path_is_moved when necessary
+        debug!("check_if_assigned_path_is_moved place: {:?}", place);
+        // recur down place; dispatch to external checks when necessary
         let mut place = place;
         loop {
             match *place {
@@ -1454,16 +1495,24 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                 Place::Projection(ref proj) => {
                     let Projection { ref base, ref elem } = **proj;
                     match *elem {
-                        ProjectionElem::Deref |
-                        // assigning to *P requires `P` initialized.
                         ProjectionElem::Index(_/*operand*/) |
                         ProjectionElem::ConstantIndex { .. } |
-                        // assigning to P[i] requires `P` initialized.
+                        // assigning to P[i] requires P to be valid.
                         ProjectionElem::Downcast(_/*adt_def*/, _/*variant_idx*/) =>
                         // assigning to (P->variant) is okay if assigning to `P` is okay
                         //
                         // FIXME: is this true even if P is a adt with a dtor?
                         { }
+
+                        // assigning to (*P) requires P to be initialized
+                        ProjectionElem::Deref => {
+                            self.check_if_full_path_is_moved(
+                                context, InitializationRequiringAction::Use,
+                                (base, span), flow_state);
+                            // (base initialized; no need to
+                            // recur further)
+                            break;
+                        }
 
                         ProjectionElem::Subslice { .. } => {
                             panic!("we don't allow assignments to subslices, context: {:?}",
@@ -1482,7 +1531,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                                     // check_loans.rs first maps
                                     // `base` to its base_path.
 
-                                    self.check_if_path_is_moved(
+                                    self.check_if_path_or_subpath_is_moved(
                                         context, InitializationRequiringAction::Assignment,
                                         (base, span), flow_state);
 
@@ -1499,6 +1548,36 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     continue;
                 }
             }
+        }
+    }
+
+    fn specialized_description(&self, place:&Place<'tcx>) -> Option<String>{
+        if let Some(_name) = self.describe_place(place) {
+            Some(format!("data in a `&` reference"))
+        } else {
+            None
+        }
+    }
+
+    fn get_default_err_msg(&self, place:&Place<'tcx>) -> String{
+        match self.describe_place(place) {
+            Some(name) => format!("immutable item `{}`", name),
+            None => "immutable item".to_owned(),
+        }
+    }
+
+    fn get_secondary_err_msg(&self, place:&Place<'tcx>) -> String{
+        match self.specialized_description(place) {
+            Some(_) => format!("data in a `&` reference"),
+            None => self.get_default_err_msg(place)
+        }
+    }
+
+    fn get_primary_err_msg(&self, place:&Place<'tcx>) -> String{
+        if let Some(name) = self.describe_place(place) {
+            format!("`{}` is a `&` reference, so the data it refers to cannot be written", name)
+        } else {
+            format!("cannot assign through `&`-reference")
         }
     }
 
@@ -1528,43 +1607,70 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                 self.is_mutable(place, is_local_mutation_allowed)
             {
                 error_reported = true;
-
-                let item_msg = match self.describe_place(place) {
-                    Some(name) => format!("immutable item `{}`", name),
-                    None => "immutable item".to_owned(),
-                };
-
+                let item_msg = self.get_default_err_msg(place);
                 let mut err = self.tcx
                     .cannot_borrow_path_as_mutable(span, &item_msg, Origin::Mir);
                 err.span_label(span, "cannot borrow as mutable");
 
                 if place != place_err {
                     if let Some(name) = self.describe_place(place_err) {
-                        err.note(&format!("Value not mutable causing this error: `{}`", name));
+                        err.note(&format!("the value which is causing this path not to be mutable \
+                                           is...: `{}`", name));
                     }
                 }
 
                 err.emit();
             },
             Reservation(WriteKind::Mutate) | Write(WriteKind::Mutate) => {
+
                 if let Err(place_err) = self.is_mutable(place, is_local_mutation_allowed) {
                     error_reported = true;
+                    let mut err_info = None;
+                    match *place_err {
 
-                    let item_msg = match self.describe_place(place) {
-                        Some(name) => format!("immutable item `{}`", name),
-                        None => "immutable item".to_owned(),
-                    };
-
-                    let mut err = self.tcx.cannot_assign(span, &item_msg, Origin::Mir);
-                    err.span_label(span, "cannot mutate");
-
-                    if place != place_err {
-                        if let Some(name) = self.describe_place(place_err) {
-                            err.note(&format!("Value not mutable causing this error: `{}`", name));
-                        }
+                        Place::Projection(box Projection {
+                        ref base, elem:ProjectionElem::Deref}) => {
+                            match *base {
+                                Place::Local(local) => {
+                                    let locations = self.mir.find_assignments(local);
+                                        if locations.len() > 0 {
+                                            let item_msg = if error_reported {
+                                                self.get_secondary_err_msg(base)
+                                            } else {
+                                                self.get_default_err_msg(place)
+                                            };
+                                            err_info = Some((
+                                                self.mir.source_info(locations[0]).span,
+                                                    "consider changing this to be a \
+                                                    mutable reference: `&mut`", item_msg,
+                                                    self.get_primary_err_msg(base)));
+                                        }
+                                },
+                            _ => {},
+                            }
+                        },
+                        _ => {},
                     }
 
-                    err.emit();
+                    if let Some((err_help_span, err_help_stmt, item_msg, sec_span)) = err_info {
+                        let mut err = self.tcx.cannot_assign(span, &item_msg, Origin::Mir);
+                        err.span_suggestion(err_help_span, err_help_stmt, format!(""));
+                        if place != place_err {
+                            err.span_label(span, sec_span);
+                        }
+                        err.emit()
+                    } else {
+                        let item_msg_ = self.get_default_err_msg(place);
+                        let mut err = self.tcx.cannot_assign(span, &item_msg_, Origin::Mir);
+                        err.span_label(span, "cannot mutate");
+                        if place != place_err {
+                            if let Some(name) = self.describe_place(place_err) {
+                                err.note(&format!("the value which is causing this path not to be \
+                                                   mutable is...: `{}`", name));
+                            }
+                        }
+                        err.emit();
+                    }
                 }
             }
             Reservation(WriteKind::Move)
@@ -1583,9 +1689,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     );
                 }
             }
-
             Activation(..) => {} // permission checks are done at Reservation point.
-
             Read(ReadKind::Borrow(BorrowKind::Unique))
             | Read(ReadKind::Borrow(BorrowKind::Mut { .. }))
             | Read(ReadKind::Borrow(BorrowKind::Shared))
@@ -2207,3 +2311,4 @@ impl ContextKind {
         }
     }
 }
+

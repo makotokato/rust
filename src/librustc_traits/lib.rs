@@ -11,11 +11,7 @@
 //! New recursive solver modeled on Chalk's recursive solver. Most of
 //! the guts are broken up into modules; see the comments in those modules.
 
-#![deny(warnings)]
-
 #![feature(crate_visibility_modifier)]
-#![feature(match_default_bindings)]
-#![feature(underscore_lifetimes)]
 
 #[macro_use]
 extern crate log;

@@ -162,7 +162,7 @@ impl_stable_hash_for!(enum ::syntax::ast::FloatTy { F32, F64 });
 impl_stable_hash_for!(enum ::syntax::ast::Unsafety { Unsafe, Normal });
 impl_stable_hash_for!(enum ::syntax::ast::Constness { Const, NotConst });
 impl_stable_hash_for!(enum ::syntax::ast::Defaultness { Default, Final });
-impl_stable_hash_for!(struct ::syntax::ast::Lifetime { id, span, ident });
+impl_stable_hash_for!(struct ::syntax::ast::Lifetime { id, ident });
 impl_stable_hash_for!(enum ::syntax::ast::StrStyle { Cooked, Raw(pounds) });
 impl_stable_hash_for!(enum ::syntax::ast::AttrStyle { Outer, Inner });
 
@@ -211,7 +211,7 @@ impl<'a> HashStable<StableHashingContext<'a>> for ast::Attribute {
         style.hash_stable(hcx, hasher);
         path.segments.len().hash_stable(hcx, hasher);
         for segment in &path.segments {
-            segment.identifier.name.hash_stable(hcx, hasher);
+            segment.ident.name.hash_stable(hcx, hasher);
         }
         for tt in tokens.trees() {
             tt.hash_stable(hcx, hasher);
@@ -318,7 +318,10 @@ fn hash_token<'a, 'gcx, W: StableHasherResult>(
             opt_name.hash_stable(hcx, hasher);
         }
 
-        token::Token::Ident(ident) |
+        token::Token::Ident(ident, is_raw) => {
+            ident.name.hash_stable(hcx, hasher);
+            is_raw.hash_stable(hcx, hasher);
+        }
         token::Token::Lifetime(ident) => ident.name.hash_stable(hcx, hasher),
 
         token::Token::Interpolated(_) => {
@@ -338,7 +341,7 @@ impl_stable_hash_for!(enum ::syntax::ast::NestedMetaItemKind {
 });
 
 impl_stable_hash_for!(struct ::syntax::ast::MetaItem {
-    name,
+    ident,
     node,
     span
 });
@@ -368,9 +371,9 @@ impl_stable_hash_for!(enum ::syntax_pos::hygiene::ExpnFormat {
 });
 
 impl_stable_hash_for!(enum ::syntax_pos::hygiene::CompilerDesugaringKind {
-    BackArrow,
     DotFill,
-    QuestionMark
+    QuestionMark,
+    Catch
 });
 
 impl_stable_hash_for!(enum ::syntax_pos::FileName {

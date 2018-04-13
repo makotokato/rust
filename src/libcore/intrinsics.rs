@@ -1293,7 +1293,6 @@ extern "rust-intrinsic" {
     pub fn bswap<T>(x: T) -> T;
 
     /// Reverses the bits in an integer type `T`.
-    #[cfg(not(stage0))]
     pub fn bitreverse<T>(x: T) -> T;
 
     /// Performs checked integer addition.
@@ -1313,6 +1312,10 @@ extern "rust-intrinsic" {
     /// primitives via the `overflowing_mul` method. For example,
     /// [`std::u32::overflowing_mul`](../../std/primitive.u32.html#method.overflowing_mul)
     pub fn mul_with_overflow<T>(x: T, y: T) -> (T, bool);
+
+    /// Performs an exact division, resulting in undefined behavior where
+    /// `x % y != 0` or `y == 0` or `x == T::min_value() && y == -1`
+    pub fn exact_div<T>(x: T, y: T) -> T;
 
     /// Performs an unchecked division, resulting in undefined behavior
     /// where y = 0 or x = `T::min_value()` and y = -1

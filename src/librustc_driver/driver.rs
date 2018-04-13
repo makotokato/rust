@@ -648,14 +648,15 @@ pub fn phase_2_configure_and_expand_inner<'a, F>(sess: &'a Session,
 {
     let (mut krate, features) = syntax::config::features(krate, &sess.parse_sess,
                                                          sess.opts.test,
-                                                         sess.opts.debugging_opts.epoch);
+                                                         sess.opts.debugging_opts.edition);
     // these need to be set "early" so that expansion sees `quote` if enabled.
     sess.init_features(features);
 
-    *sess.crate_types.borrow_mut() = collect_crate_types(sess, &krate.attrs);
+    let crate_types = collect_crate_types(sess, &krate.attrs);
+    sess.crate_types.set(crate_types);
 
     let disambiguator = compute_crate_disambiguator(sess);
-    *sess.crate_disambiguator.borrow_mut() = Some(disambiguator);
+    sess.crate_disambiguator.set(disambiguator);
     rustc_incremental::prepare_session_directory(
         sess,
         &crate_name,
@@ -783,7 +784,7 @@ pub fn phase_2_configure_and_expand_inner<'a, F>(sess: &'a Session,
         let features = sess.features_untracked();
         let cfg = syntax::ext::expand::ExpansionConfig {
             features: Some(&features),
-            recursion_limit: sess.recursion_limit.get(),
+            recursion_limit: *sess.recursion_limit.get(),
             trace_mac: sess.opts.debugging_opts.trace_macros,
             should_test: sess.opts.test,
             ..syntax::ext::expand::ExpansionConfig::default(crate_name.to_string())
@@ -901,7 +902,9 @@ pub fn phase_2_configure_and_expand_inner<'a, F>(sess: &'a Session,
         Some(future) => {
             let prev_graph = time(sess, "blocked while dep-graph loading finishes", || {
                 future.open()
-                      .expect("Could not join with background dep_graph thread")
+                      .unwrap_or_else(|e| rustc_incremental::LoadResult::Error {
+                          message: format!("could not decode incremental cache: {:?}", e)
+                      })
                       .open(sess)
             });
             DepGraph::new(prev_graph)

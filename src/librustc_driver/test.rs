@@ -303,7 +303,7 @@ impl<'a, 'gcx, 'tcx> Env<'a, 'gcx, 'tcx> {
 
     pub fn t_param(&self, index: u32) -> Ty<'tcx> {
         let name = format!("T{}", index);
-        self.infcx.tcx.mk_param(index, Symbol::intern(&name))
+        self.infcx.tcx.mk_param(index, Symbol::intern(&name).as_str())
     }
 
     pub fn re_early_bound(&self, index: u32, name: &'static str) -> ty::Region<'tcx> {
@@ -455,8 +455,7 @@ fn sub_free_bound_false_infer() {
     //! does NOT hold for any instantiation of `_#1`.
 
     test_env(EMPTY_SOURCE_STR, errors(&[]), |env| {
-        let t_infer1 = env.infcx.next_ty_var(ty::UniverseIndex::ROOT,
-                                             TypeVariableOrigin::MiscVariable(DUMMY_SP));
+        let t_infer1 = env.infcx.next_ty_var(TypeVariableOrigin::MiscVariable(DUMMY_SP));
         let t_rptr_bound1 = env.t_rptr_late_bound(1);
         env.check_not_sub(env.t_fn(&[t_infer1], env.tcx().types.isize),
                           env.t_fn(&[t_rptr_bound1], env.tcx().types.isize));

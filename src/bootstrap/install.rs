@@ -63,7 +63,7 @@ fn install_sh(
     host: Option<Interned<String>>
 ) {
     let build = builder.build;
-    println!("Install {} stage{} ({:?})", package, stage, host);
+    build.info(&format!("Install {} stage{} ({:?})", package, stage, host));
 
     let prefix_default = PathBuf::from("/usr/local");
     let sysconfdir_default = PathBuf::from("/etc");
@@ -72,7 +72,9 @@ fn install_sh(
     let bindir_default = PathBuf::from("bin");
     let libdir_default = PathBuf::from("lib");
     let mandir_default = datadir_default.join("man");
-    let prefix = build.config.prefix.as_ref().unwrap_or(&prefix_default);
+    let prefix = build.config.prefix.as_ref().map_or(prefix_default, |p| {
+        fs::canonicalize(p).expect(&format!("could not canonicalize {}", p.display()))
+    });
     let sysconfdir = build.config.sysconfdir.as_ref().unwrap_or(&sysconfdir_default);
     let datadir = build.config.datadir.as_ref().unwrap_or(&datadir_default);
     let docdir = build.config.docdir.as_ref().unwrap_or(&docdir_default);
@@ -212,7 +214,7 @@ install!((self, builder, _config),
             Self::should_install(builder) {
             install_rls(builder, self.stage, self.target);
         } else {
-            println!("skipping Install RLS stage{} ({})", self.stage, self.target);
+            builder.info(&format!("skipping Install RLS stage{} ({})", self.stage, self.target));
         }
     };
     Rustfmt, "rustfmt", Self::should_build(_config), only_hosts: true, {
@@ -220,7 +222,8 @@ install!((self, builder, _config),
             Self::should_install(builder) {
             install_rustfmt(builder, self.stage, self.target);
         } else {
-            println!("skipping Install Rustfmt stage{} ({})", self.stage, self.target);
+            builder.info(
+                &format!("skipping Install Rustfmt stage{} ({})", self.stage, self.target));
         }
     };
     Analysis, "analysis", Self::should_build(_config), only_hosts: false, {

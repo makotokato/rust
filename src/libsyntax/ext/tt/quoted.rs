@@ -200,7 +200,7 @@ pub fn parse(
                 let span = match trees.next() {
                     Some(tokenstream::TokenTree::Token(span, token::Colon)) => match trees.next() {
                         Some(tokenstream::TokenTree::Token(end_sp, ref tok)) => match tok.ident() {
-                            Some(kind) => {
+                            Some((kind, _)) => {
                                 let span = end_sp.with_lo(start_sp.lo());
                                 result.push(TokenTree::MetaVarDecl(span, ident, kind));
                                 continue;
@@ -289,14 +289,11 @@ where
             // `tree` is followed by an `ident`. This could be `$meta_var` or the `$crate` special
             // metavariable that names the crate of the invokation.
             Some(tokenstream::TokenTree::Token(ident_span, ref token)) if token.is_ident() => {
-                let ident = token.ident().unwrap();
+                let (ident, is_raw) = token.ident().unwrap();
                 let span = ident_span.with_lo(span.lo());
-                if ident.name == keywords::Crate.name() {
-                    let ident = ast::Ident {
-                        name: keywords::DollarCrate.name(),
-                        ..ident
-                    };
-                    TokenTree::Token(span, token::Ident(ident))
+                if ident.name == keywords::Crate.name() && !is_raw {
+                    let ident = ast::Ident::new(keywords::DollarCrate.name(), ident.span);
+                    TokenTree::Token(span, token::Ident(ident, is_raw))
                 } else {
                     TokenTree::MetaVar(span, ident)
                 }
