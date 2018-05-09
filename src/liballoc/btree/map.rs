@@ -1287,8 +1287,7 @@ impl<K, V> IntoIterator for BTreeMap<K, V> {
 #[stable(feature = "btree_drop", since = "1.7.0")]
 impl<K, V> Drop for IntoIter<K, V> {
     fn drop(&mut self) {
-        for _ in &mut *self {
-        }
+        self.for_each(drop);
         unsafe {
             let leaf_node = ptr::read(&self.front).into_node();
             if let Some(first_parent) = leaf_node.deallocate_and_ascend() {
@@ -2156,8 +2155,8 @@ impl<'a, K: Ord, V> Entry<'a, K, V> {
     /// assert_eq!(map["poneyland"], 43);
     /// ```
     #[stable(feature = "entry_and_modify", since = "1.26.0")]
-    pub fn and_modify<F>(self, mut f: F) -> Self
-        where F: FnMut(&mut V)
+    pub fn and_modify<F>(self, f: F) -> Self
+        where F: FnOnce(&mut V)
     {
         match self {
             Occupied(mut entry) => {

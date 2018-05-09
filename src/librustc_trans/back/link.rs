@@ -17,7 +17,6 @@ use super::command::Command;
 use super::rpath::RPathConfig;
 use super::rpath;
 use metadata::METADATA_FILENAME;
-use rustc_back::LinkerFlavor;
 use rustc::session::config::{self, NoDebugInfo, OutputFilenames, OutputType, PrintRequest};
 use rustc::session::config::{RUST_CGU_EXT, Lto};
 use rustc::session::filesearch;
@@ -30,8 +29,7 @@ use rustc::util::common::time;
 use rustc::util::fs::fix_windows_verbatim_for_gcc;
 use rustc::hir::def_id::CrateNum;
 use tempdir::TempDir;
-use rustc_back::{PanicStrategy, RelroLevel};
-use rustc_back::target::TargetTriple;
+use rustc_target::spec::{PanicStrategy, RelroLevel, LinkerFlavor, TargetTriple};
 use rustc_data_structures::fx::FxHashSet;
 use context::get_reloc_model;
 use llvm;
@@ -149,8 +147,9 @@ pub(crate) fn link_binary(sess: &Session,
     let mut out_filenames = Vec::new();
     for &crate_type in sess.crate_types.borrow().iter() {
         // Ignore executable crates if we have -Z no-trans, as they will error.
-        if (sess.opts.debugging_opts.no_trans ||
-            !sess.opts.output_types.should_trans()) &&
+        let output_metadata = sess.opts.output_types.contains_key(&OutputType::Metadata);
+        if (sess.opts.debugging_opts.no_trans || !sess.opts.output_types.should_trans()) &&
+           !output_metadata &&
            crate_type == config::CrateTypeExecutable {
             continue;
         }

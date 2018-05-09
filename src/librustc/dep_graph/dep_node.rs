@@ -70,7 +70,8 @@ use rustc_data_structures::stable_hasher::{StableHasher, HashStable};
 use std::fmt;
 use std::hash::Hash;
 use syntax_pos::symbol::InternedString;
-use traits::query::{CanonicalProjectionGoal, CanonicalTyGoal};
+use traits::query::{CanonicalProjectionGoal,
+                    CanonicalTyGoal, CanonicalPredicateGoal};
 use ty::{TyCtxt, Instance, InstanceDef, ParamEnv, ParamEnvAnd, PolyTraitRef, Ty};
 use ty::subst::Substs;
 
@@ -556,7 +557,6 @@ define_dep_nodes!( <'tcx>
     [input] DefSpan(DefId),
     [] LookupStability(DefId),
     [] LookupDeprecationEntry(DefId),
-    [] ItemBodyNestedBodies(DefId),
     [] ConstIsRvaluePromotableToStatic(DefId),
     [] RvaluePromotableMap(DefId),
     [] ImplParent(DefId),
@@ -567,6 +567,7 @@ define_dep_nodes!( <'tcx>
     [] ItemAttrs(DefId),
     [] TransFnAttrs(DefId),
     [] FnArgNames(DefId),
+    [] RenderedConst(DefId),
     [] DylibDepFormats(CrateNum),
     [] IsPanicRuntime(CrateNum),
     [] IsCompilerBuiltins(CrateNum),
@@ -615,7 +616,6 @@ define_dep_nodes!( <'tcx>
     [input] GetLangItems,
     [] DefinedLangItems(CrateNum),
     [] MissingLangItems(CrateNum),
-    [] ExternConstBody(DefId),
     [] VisibleParentMap,
     [input] MissingExternCrateItem(CrateNum),
     [input] UsedCrateSource(CrateNum),
@@ -644,6 +644,7 @@ define_dep_nodes!( <'tcx>
     [] NormalizeProjectionTy(CanonicalProjectionGoal<'tcx>),
     [] NormalizeTyAfterErasingRegions(ParamEnvAnd<'tcx, Ty<'tcx>>),
     [] DropckOutlives(CanonicalTyGoal<'tcx>),
+    [] EvaluateObligation(CanonicalPredicateGoal<'tcx>),
 
     [] SubstituteNormalizeAndTestPredicates { key: (DefId, &'tcx Substs<'tcx>) },
 
@@ -656,6 +657,7 @@ define_dep_nodes!( <'tcx>
     [input] Features,
 
     [] ProgramClausesFor(DefId),
+    [] ProgramClausesForEnv(ParamEnv<'tcx>),
     [] WasmImportModuleMap(CrateNum),
     [] ForeignModules(CrateNum),
 

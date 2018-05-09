@@ -55,8 +55,6 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use raw_vec::RawVec;
-
 use core::any::Any;
 use core::borrow;
 use core::cmp::Ordering;
@@ -64,10 +62,12 @@ use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::iter::FusedIterator;
 use core::marker::{Unpin, Unsize};
-use core::mem::{self, Pin};
+use core::mem::{self, PinMut};
 use core::ops::{CoerceUnsized, Deref, DerefMut, Generator, GeneratorState};
 use core::ptr::{self, NonNull, Unique};
 use core::convert::From;
+
+use raw_vec::RawVec;
 use str::from_boxed_utf8_unchecked;
 
 /// A pointer type for heap allocation.
@@ -184,6 +184,7 @@ impl<T: ?Sized> Box<T> {
 
     #[unstable(feature = "ptr_internals", issue = "0", reason = "use into_raw_non_null instead")]
     #[inline]
+    #[doc(hidden)]
     pub fn into_unique(b: Box<T>) -> Unique<T> {
         let unique = b.0;
         mem::forget(b);
@@ -429,6 +430,7 @@ impl<'a, T: Copy> From<&'a [T]> for Box<[T]> {
 
 #[stable(feature = "box_from_slice", since = "1.17.0")]
 impl<'a> From<&'a str> for Box<str> {
+    #[inline]
     fn from(s: &'a str) -> Box<str> {
         unsafe { from_boxed_utf8_unchecked(Box::from(s.as_bytes())) }
     }
@@ -436,6 +438,7 @@ impl<'a> From<&'a str> for Box<str> {
 
 #[stable(feature = "boxed_str_conv", since = "1.19.0")]
 impl From<Box<str>> for Box<[u8]> {
+    #[inline]
     fn from(s: Box<str>) -> Self {
         unsafe { Box::from_raw(Box::into_raw(s) as *mut [u8]) }
     }
@@ -768,8 +771,8 @@ impl<T> PinBox<T> {
 #[unstable(feature = "pin", issue = "49150")]
 impl<T: ?Sized> PinBox<T> {
     /// Get a pinned reference to the data in this PinBox.
-    pub fn as_pin<'a>(&'a mut self) -> Pin<'a, T> {
-        unsafe { Pin::new_unchecked(&mut *self.inner) }
+    pub fn as_pin_mut<'a>(&'a mut self) -> PinMut<'a, T> {
+        unsafe { PinMut::new_unchecked(&mut *self.inner) }
     }
 
     /// Get a mutable reference to the data inside this PinBox.

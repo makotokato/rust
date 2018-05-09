@@ -34,10 +34,11 @@ use middle::resolve_lifetime::{self, ObjectLifetimeDefault};
 use middle::stability;
 use mir::{self, Mir, interpret};
 use mir::interpret::{Value, PrimVal};
-use ty::subst::{Kind, Substs};
+use ty::subst::{Kind, Substs, Subst};
 use ty::ReprOptions;
 use ty::Instance;
 use traits;
+use traits::{Clause, Clauses, Goal, Goals};
 use ty::{self, Ty, TypeAndMut};
 use ty::{TyS, TypeVariants, Slice};
 use ty::{AdtKind, AdtDef, ClosureSubsts, GeneratorInterior, Region, Const};
@@ -56,12 +57,11 @@ use rustc_data_structures::accumulate_vec::AccumulateVec;
 use rustc_data_structures::stable_hasher::{HashStable, hash_stable_hashmap,
                                            StableHasher, StableHasherResult,
                                            StableVec};
-use arena::{TypedArena, DroplessArena};
+use arena::{TypedArena, SyncDroplessArena};
 use rustc_data_structures::indexed_vec::IndexVec;
 use rustc_data_structures::sync::{Lrc, Lock};
 use std::any::Any;
 use std::borrow::Borrow;
-use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::hash_map::{self, Entry};
 use std::hash::{Hash, Hasher};
@@ -70,7 +70,7 @@ use std::ops::Deref;
 use std::iter;
 use std::sync::mpsc;
 use std::sync::Arc;
-use syntax::abi;
+use rustc_target::spec::abi;
 use syntax::ast::{self, NodeId};
 use syntax::attr;
 use syntax::codemap::MultiSpan;
@@ -82,14 +82,14 @@ use hir;
 
 pub struct AllArenas<'tcx> {
     pub global: GlobalArenas<'tcx>,
-    pub interner: DroplessArena,
+    pub interner: SyncDroplessArena,
 }
 
 impl<'tcx> AllArenas<'tcx> {
     pub fn new() -> Self {
         AllArenas {
             global: GlobalArenas::new(),
-            interner: DroplessArena::new(),
+            interner: SyncDroplessArena::new(),
         }
     }
 }
@@ -125,34 +125,40 @@ impl<'tcx> GlobalArenas<'tcx> {
     }
 }
 
+type InternedSet<'tcx, T> = Lock<FxHashSet<Interned<'tcx, T>>>;
+
 pub struct CtxtInterners<'tcx> {
     /// The arena that types, regions, etc are allocated from
-    arena: &'tcx DroplessArena,
+    arena: &'tcx SyncDroplessArena,
 
     /// Specifically use a speedy hash algorithm for these hash sets,
     /// they're accessed quite often.
-    type_: Lock<FxHashSet<Interned<'tcx, TyS<'tcx>>>>,
-    type_list: Lock<FxHashSet<Interned<'tcx, Slice<Ty<'tcx>>>>>,
-    substs: Lock<FxHashSet<Interned<'tcx, Substs<'tcx>>>>,
-    canonical_var_infos: Lock<FxHashSet<Interned<'tcx, Slice<CanonicalVarInfo>>>>,
-    region: Lock<FxHashSet<Interned<'tcx, RegionKind>>>,
-    existential_predicates: Lock<FxHashSet<Interned<'tcx, Slice<ExistentialPredicate<'tcx>>>>>,
-    predicates: Lock<FxHashSet<Interned<'tcx, Slice<Predicate<'tcx>>>>>,
-    const_: Lock<FxHashSet<Interned<'tcx, Const<'tcx>>>>,
+    type_: InternedSet<'tcx, TyS<'tcx>>,
+    type_list: InternedSet<'tcx, Slice<Ty<'tcx>>>,
+    substs: InternedSet<'tcx, Substs<'tcx>>,
+    canonical_var_infos: InternedSet<'tcx, Slice<CanonicalVarInfo>>,
+    region: InternedSet<'tcx, RegionKind>,
+    existential_predicates: InternedSet<'tcx, Slice<ExistentialPredicate<'tcx>>>,
+    predicates: InternedSet<'tcx, Slice<Predicate<'tcx>>>,
+    const_: InternedSet<'tcx, Const<'tcx>>,
+    clauses: InternedSet<'tcx, Slice<Clause<'tcx>>>,
+    goals: InternedSet<'tcx, Slice<Goal<'tcx>>>,
 }
 
 impl<'gcx: 'tcx, 'tcx> CtxtInterners<'tcx> {
-    fn new(arena: &'tcx DroplessArena) -> CtxtInterners<'tcx> {
+    fn new(arena: &'tcx SyncDroplessArena) -> CtxtInterners<'tcx> {
         CtxtInterners {
-            arena: arena,
-            type_: Lock::new(FxHashSet()),
-            type_list: Lock::new(FxHashSet()),
-            substs: Lock::new(FxHashSet()),
-            canonical_var_infos: Lock::new(FxHashSet()),
-            region: Lock::new(FxHashSet()),
-            existential_predicates: Lock::new(FxHashSet()),
-            predicates: Lock::new(FxHashSet()),
-            const_: Lock::new(FxHashSet()),
+            arena,
+            type_: Default::default(),
+            type_list: Default::default(),
+            substs: Default::default(),
+            region: Default::default(),
+            existential_predicates: Default::default(),
+            canonical_var_infos: Default::default(),
+            predicates: Default::default(),
+            const_: Default::default(),
+            clauses: Default::default(),
+            goals: Default::default(),
         }
     }
 
@@ -167,10 +173,10 @@ impl<'gcx: 'tcx, 'tcx> CtxtInterners<'tcx> {
                 return ty;
             }
             let global_interner = global_interners.map(|interners| {
-                interners.type_.borrow_mut()
+                (interners.type_.borrow_mut(), &interners.arena)
             });
-            if let Some(ref interner) = global_interner {
-                if let Some(&Interned(ty)) = interner.get(&st) {
+            if let Some((ref type_, _)) = global_interner {
+                if let Some(&Interned(ty)) = type_.get(&st) {
                     return ty;
                 }
             }
@@ -186,18 +192,18 @@ impl<'gcx: 'tcx, 'tcx> CtxtInterners<'tcx> {
             // determine that all contents are in the global tcx.
             // See comments on Lift for why we can't use that.
             if !flags.flags.intersects(ty::TypeFlags::KEEP_IN_LOCAL_TCX) {
-                if let Some(interner) = global_interners {
+                if let Some((mut type_, arena)) = global_interner {
                     let ty_struct: TyS<'gcx> = unsafe {
                         mem::transmute(ty_struct)
                     };
-                    let ty: Ty<'gcx> = interner.arena.alloc(ty_struct);
-                    global_interner.unwrap().insert(Interned(ty));
+                    let ty: Ty<'gcx> = arena.alloc(ty_struct);
+                    type_.insert(Interned(ty));
                     return ty;
                 }
             } else {
                 // Make sure we don't end up with inference
                 // types/regions in the global tcx.
-                if global_interners.is_none() {
+                if global_interner.is_none() {
                     drop(interner);
                     bug!("Attempted to intern `{:?}` which contains \
                           inference types/regions in the global type context",
@@ -890,7 +896,7 @@ pub struct GlobalCtxt<'tcx> {
     maybe_unused_extern_crates: Vec<(DefId, Span)>,
 
     // Internal cache for metadata decoding. No need to track deps on this.
-    pub rcache: RefCell<FxHashMap<ty::CReaderCacheKey, Ty<'tcx>>>,
+    pub rcache: Lock<FxHashMap<ty::CReaderCacheKey, Ty<'tcx>>>,
 
     /// Caches the results of trait selection. This cache is used
     /// for things that do not have to do with the parameters in scope.
@@ -907,9 +913,6 @@ pub struct GlobalCtxt<'tcx> {
 
     /// Data layout specification for the current target.
     pub data_layout: TargetDataLayout,
-
-    /// Used to prevent layout from recursing too deeply.
-    pub layout_depth: Cell<usize>,
 
     stability_interner: Lock<FxHashSet<&'tcx attr::Stability>>,
 
@@ -949,18 +952,16 @@ struct InterpretInternerInner<'tcx> {
     /// Allows obtaining const allocs via a unique identifier
     alloc_by_id: FxHashMap<interpret::AllocId, &'tcx interpret::Allocation>,
 
-    /// Reverse map of `alloc_cache`
-    global_cache: FxHashMap<interpret::AllocId, DefId>,
+    /// Allows obtaining static def ids via a unique id
+    statics: FxHashMap<interpret::AllocId, DefId>,
 
     /// The AllocId to assign to the next new regular allocation.
     /// Always incremented, never gets smaller.
     next_id: interpret::AllocId,
 
-    /// Allows checking whether a static already has an allocation
-    ///
-    /// This is only important for detecting statics referring to themselves
-    // FIXME(oli-obk) move it to the EvalContext?
-    alloc_cache: FxHashMap<DefId, interpret::AllocId>,
+    /// Inverse map of `statics`
+    /// Used so we don't allocate a new pointer every time we need one
+    static_cache: FxHashMap<DefId, interpret::AllocId>,
 
     /// A cache for basic byte allocations keyed by their contents. This is used to deduplicate
     /// allocations for string and bytestring literals.
@@ -994,30 +995,25 @@ impl<'tcx> InterpretInterner<'tcx> {
         self.inner.borrow().alloc_by_id.get(&id).cloned()
     }
 
-    pub fn get_cached(
+    pub fn cache_static(
         &self,
         static_id: DefId,
-    ) -> Option<interpret::AllocId> {
-        self.inner.borrow().alloc_cache.get(&static_id).cloned()
-    }
-
-    pub fn cache(
-        &self,
-        static_id: DefId,
-        alloc_id: interpret::AllocId,
-    ) {
-        let mut inner = self.inner.borrow_mut();
-        inner.global_cache.insert(alloc_id, static_id);
-        if let Some(old) = inner.alloc_cache.insert(static_id, alloc_id) {
-            bug!("tried to cache {:?}, but was already existing as {:#?}", static_id, old);
+    ) -> interpret::AllocId {
+        if let Some(alloc_id) = self.inner.borrow().static_cache.get(&static_id).cloned() {
+            return alloc_id;
         }
+        let alloc_id = self.reserve();
+        let mut inner = self.inner.borrow_mut();
+        inner.static_cache.insert(static_id, alloc_id);
+        inner.statics.insert(alloc_id, static_id);
+        alloc_id
     }
 
-    pub fn get_corresponding_static_def_id(
+    pub fn get_static(
         &self,
         ptr: interpret::AllocId,
     ) -> Option<DefId> {
-        self.inner.borrow().global_cache.get(&ptr).cloned()
+        self.inner.borrow().statics.get(&ptr).cloned()
     }
 
     pub fn intern_at_reserved(
@@ -1208,7 +1204,9 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                                   f: F) -> R
                                   where F: for<'b> FnOnce(TyCtxt<'b, 'tcx, 'tcx>) -> R
     {
-        let data_layout = TargetDataLayout::parse(s);
+        let data_layout = TargetDataLayout::parse(&s.target.target).unwrap_or_else(|err| {
+            s.fatal(&err);
+        });
         let interners = CtxtInterners::new(&arenas.interner);
         let common_types = CommonTypes::new(&interners);
         let dep_graph = hir.dep_graph.clone();
@@ -1286,13 +1284,12 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             hir,
             def_path_hash_to_def_id,
             maps: maps::Maps::new(providers),
-            rcache: RefCell::new(FxHashMap()),
+            rcache: Lock::new(FxHashMap()),
             selection_cache: traits::SelectionCache::new(),
             evaluation_cache: traits::EvaluationCache::new(),
             crate_name: Symbol::intern(crate_name),
             data_layout,
             layout_interner: Lock::new(FxHashSet()),
-            layout_depth: Cell::new(0),
             stability_interner: Lock::new(FxHashSet()),
             interpret_interner: Default::default(),
             tx_to_llvm_workers: Lock::new(tx),
@@ -1464,15 +1461,17 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         self.on_disk_query_result_cache.serialize(self.global_tcx(), encoder)
     }
 
-    /// If true, we should use NLL-style region checking instead of
-    /// lexical style.
-    pub fn nll(self) -> bool {
-        self.features().nll || self.sess.opts.debugging_opts.nll
-    }
-
     /// If true, we should use the MIR-based borrowck (we may *also* use
     /// the AST-based borrowck).
-    pub fn use_mir(self) -> bool {
+    pub fn use_mir_borrowck(self) -> bool {
+        self.borrowck_mode().use_mir()
+    }
+
+    /// If true, pattern variables for use in guards on match arms
+    /// will be bound as references to the data, and occurrences of
+    /// those variables in the guard expression will implicitly
+    /// dereference those bindings. (See rust-lang/rust#27282.)
+    pub fn all_pat_vars_are_implicit_refs_within_guards(self) -> bool {
         self.borrowck_mode().use_mir()
     }
 
@@ -1491,7 +1490,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             mode @ BorrowckMode::Compare => mode,
 
             mode @ BorrowckMode::Ast => {
-                if self.nll() {
+                if self.features().nll {
                     BorrowckMode::Mir
                 } else {
                     mode
@@ -1505,11 +1504,9 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     /// MIR borrowck, but not when NLL is used. They are also consumed
     /// by the validation stuff.
     pub fn emit_end_regions(self) -> bool {
-        // FIXME(#46875) -- we should not emit end regions when NLL is enabled,
-        // but for now we can't stop doing so because it causes false positives
         self.sess.opts.debugging_opts.emit_end_regions ||
             self.sess.opts.debugging_opts.mir_emit_validate > 0 ||
-            self.use_mir()
+            self.use_mir_borrowck()
     }
 
     #[inline]
@@ -1559,7 +1556,7 @@ impl<'gcx: 'tcx, 'tcx> GlobalCtxt<'gcx> {
     /// Call the closure with a local `TyCtxt` using the given arena.
     pub fn enter_local<F, R>(
         &self,
-        arena: &'tcx DroplessArena,
+        arena: &'tcx SyncDroplessArena,
         f: F
     ) -> R
     where
@@ -1574,6 +1571,8 @@ impl<'gcx: 'tcx, 'tcx> GlobalCtxt<'gcx> {
             let new_icx = ty::tls::ImplicitCtxt {
                 tcx,
                 query: icx.query.clone(),
+                layout_depth: icx.layout_depth,
+                task: icx.task,
             };
             ty::tls::enter_context(&new_icx, |new_icx| {
                 f(new_icx.tcx)
@@ -1753,6 +1752,7 @@ pub mod tls {
     use errors::{Diagnostic, TRACK_DIAGNOSTICS};
     use rustc_data_structures::OnDrop;
     use rustc_data_structures::sync::Lrc;
+    use dep_graph::OpenTask;
 
     /// This is the implicit state of rustc. It contains the current
     /// TyCtxt and query. It is updated when creating a local interner or
@@ -1768,6 +1768,13 @@ pub mod tls {
         /// The current query job, if any. This is updated by start_job in
         /// ty::maps::plumbing when executing a query
         pub query: Option<Lrc<maps::QueryJob<'gcx>>>,
+
+        /// Used to prevent layout from recursing too deeply.
+        pub layout_depth: usize,
+
+        /// The current dep graph task. This is used to add dependencies to queries
+        /// when executing them
+        pub task: &'a OpenTask,
     }
 
     // A thread local value which stores a pointer to the current ImplicitCtxt
@@ -1853,6 +1860,8 @@ pub mod tls {
             let icx = ImplicitCtxt {
                 tcx,
                 query: None,
+                layout_depth: 0,
+                task: &OpenTask::Ignore,
             };
             enter_context(&icx, |_| {
                 f(tcx)
@@ -2099,12 +2108,26 @@ impl<'tcx: 'lcx, 'lcx> Borrow<Const<'lcx>> for Interned<'tcx, Const<'tcx>> {
     }
 }
 
+impl<'tcx: 'lcx, 'lcx> Borrow<[Clause<'lcx>]>
+for Interned<'tcx, Slice<Clause<'tcx>>> {
+    fn borrow<'a>(&'a self) -> &'a [Clause<'lcx>] {
+        &self.0[..]
+    }
+}
+
+impl<'tcx: 'lcx, 'lcx> Borrow<[Goal<'lcx>]>
+for Interned<'tcx, Slice<Goal<'tcx>>> {
+    fn borrow<'a>(&'a self) -> &'a [Goal<'lcx>] {
+        &self.0[..]
+    }
+}
+
 macro_rules! intern_method {
     ($lt_tcx:tt, $name:ident: $method:ident($alloc:ty,
                                             $alloc_method:ident,
                                             $alloc_to_key:expr,
                                             $alloc_to_ret:expr,
-                                            $needs_infer:expr) -> $ty:ty) => {
+                                            $keep_in_local_tcx:expr) -> $ty:ty) => {
         impl<'a, 'gcx, $lt_tcx> TyCtxt<'a, 'gcx, $lt_tcx> {
             pub fn $method(self, v: $alloc) -> &$lt_tcx $ty {
                 {
@@ -2122,7 +2145,7 @@ macro_rules! intern_method {
                 // HACK(eddyb) Depend on flags being accurate to
                 // determine that all contents are in the global tcx.
                 // See comments on Lift for why we can't use that.
-                if !($needs_infer)(&v) {
+                if !($keep_in_local_tcx)(&v) {
                     if !self.is_global() {
                         let v = unsafe {
                             mem::transmute(v)
@@ -2150,7 +2173,7 @@ macro_rules! intern_method {
 }
 
 macro_rules! direct_interners {
-    ($lt_tcx:tt, $($name:ident: $method:ident($needs_infer:expr) -> $ty:ty),+) => {
+    ($lt_tcx:tt, $($name:ident: $method:ident($keep_in_local_tcx:expr) -> $ty:ty),+) => {
         $(impl<$lt_tcx> PartialEq for Interned<$lt_tcx, $ty> {
             fn eq(&self, other: &Self) -> bool {
                 self.0 == other.0
@@ -2165,7 +2188,10 @@ macro_rules! direct_interners {
             }
         }
 
-        intern_method!($lt_tcx, $name: $method($ty, alloc, |x| x, |x| x, $needs_infer) -> $ty);)+
+        intern_method!(
+            $lt_tcx,
+            $name: $method($ty, alloc, |x| x, |x| x, $keep_in_local_tcx) -> $ty
+        );)+
     }
 }
 
@@ -2174,12 +2200,7 @@ pub fn keep_local<'tcx, T: ty::TypeFoldable<'tcx>>(x: &T) -> bool {
 }
 
 direct_interners!('tcx,
-    region: mk_region(|r| {
-        match r {
-            &ty::ReVar(_) | &ty::ReSkolemized(..) => true,
-            _ => false
-        }
-    }) -> RegionKind,
+    region: mk_region(|r: &RegionKind| r.keep_in_local_tcx()) -> RegionKind,
     const_: mk_const(|c: &Const| keep_local(&c.ty) || keep_local(&c.val)) -> Const<'tcx>
 );
 
@@ -2196,7 +2217,9 @@ slice_interners!(
     existential_predicates: _intern_existential_predicates(ExistentialPredicate),
     predicates: _intern_predicates(Predicate),
     type_list: _intern_type_list(Ty),
-    substs: _intern_substs(Kind)
+    substs: _intern_substs(Kind),
+    clauses: _intern_clauses(Clause),
+    goals: _intern_goals(Goal)
 );
 
 // This isn't a perfect fit: CanonicalVarInfo slices are always
@@ -2311,7 +2334,15 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     pub fn mk_box(self, ty: Ty<'tcx>) -> Ty<'tcx> {
         let def_id = self.require_lang_item(lang_items::OwnedBoxLangItem);
         let adt_def = self.adt_def(def_id);
-        let substs = self.mk_substs(iter::once(Kind::from(ty)));
+        let generics = self.generics_of(def_id);
+        let mut substs = vec![Kind::from(ty)];
+        // Add defaults for other generic params if there are some.
+        for def in generics.types.iter().skip(1) {
+            assert!(def.has_default);
+            let ty = self.type_of(def.def_id).subst(self, &substs);
+            substs.push(ty.into());
+        }
+        let substs = self.mk_substs(substs.into_iter());
         self.mk_ty(TyAdt(adt_def, substs))
     }
 
@@ -2364,6 +2395,14 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
 
     pub fn mk_nil(self) -> Ty<'tcx> {
         self.intern_tup(&[])
+    }
+
+    pub fn mk_diverging_default(self) -> Ty<'tcx> {
+        if self.features().never_type {
+            self.types.never
+        } else {
+            self.intern_tup(&[])
+        }
     }
 
     pub fn mk_bool(self) -> Ty<'tcx> {
@@ -2446,7 +2485,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     }
 
     pub fn mk_self_type(self) -> Ty<'tcx> {
-        self.mk_param(0, keywords::SelfType.name().as_str())
+        self.mk_param(0, keywords::SelfType.name().as_interned_str())
     }
 
     pub fn mk_param_from_def(self, def: &ty::TypeParameterDef) -> Ty<'tcx> {
@@ -2501,6 +2540,22 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         }
     }
 
+    pub fn intern_clauses(self, ts: &[Clause<'tcx>]) -> Clauses<'tcx> {
+        if ts.len() == 0 {
+            Slice::empty()
+        } else {
+            self._intern_clauses(ts)
+        }
+    }
+
+    pub fn intern_goals(self, ts: &[Goal<'tcx>]) -> Goals<'tcx> {
+        if ts.len() == 0 {
+            Slice::empty()
+        } else {
+            self._intern_goals(ts)
+        }
+    }
+
     pub fn mk_fn_sig<I>(self,
                         inputs: I,
                         output: I::Item,
@@ -2545,6 +2600,18 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                     -> &'tcx Substs<'tcx>
     {
         self.mk_substs(iter::once(s).chain(t.into_iter().cloned()).map(Kind::from))
+    }
+
+    pub fn mk_clauses<I: InternAs<[Clause<'tcx>], Clauses<'tcx>>>(self, iter: I) -> I::Output {
+        iter.intern_with(|xs| self.intern_clauses(xs))
+    }
+
+    pub fn mk_goals<I: InternAs<[Goal<'tcx>], Goals<'tcx>>>(self, iter: I) -> I::Output {
+        iter.intern_with(|xs| self.intern_goals(xs))
+    }
+
+    pub fn mk_goal(self, goal: Goal<'tcx>) -> &'tcx Goal {
+        &self.mk_goals(iter::once(goal))[0]
     }
 
     pub fn lint_node<S: Into<MultiSpan>>(self,

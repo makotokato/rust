@@ -998,7 +998,7 @@ pub trait Iterator {
     /// an extra layer of indirection. `flat_map()` will remove this extra layer
     /// on its own.
     ///
-    /// You can think of [`flat_map(f)`][flat_map] as the semantic equivalent
+    /// You can think of `flat_map(f)` as the semantic equivalent
     /// of [`map`]ping, and then [`flatten`]ing as in `map(f).flatten()`.
     ///
     /// Another way of thinking about `flat_map()`: [`map`]'s closure returns
@@ -1094,6 +1094,8 @@ pub trait Iterator {
     /// `flatten()` a three-dimensional array the result will be
     /// two-dimensional and not one-dimensional. To get a one-dimensional
     /// structure, you have to `flatten()` again.
+    ///
+    /// [`flat_map()`]: #method.flat_map
     #[inline]
     #[unstable(feature = "iterator_flatten", issue = "48213")]
     fn flatten(self) -> Flatten<Self>

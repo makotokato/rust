@@ -79,6 +79,7 @@ o("llvm-release-debuginfo", "llvm.release-debuginfo", "build LLVM with debugger 
 o("debuginfo", "rust.debuginfo", "build with debugger metadata")
 o("debuginfo-lines", "rust.debuginfo-lines", "build with line number debugger metadata")
 o("debuginfo-only-std", "rust.debuginfo-only-std", "build only libstd with debugging information")
+o("debuginfo-tools", "rust.debuginfo-tools", "build extended tools with debugging information")
 o("debug-jemalloc", "rust.debug-jemalloc", "build jemalloc with --enable-debug --enable-fill")
 v("save-toolstates", "rust.save-toolstates", "save build and test status of external tools into this file")
 
@@ -119,6 +120,8 @@ v("musl-root-arm", "target.arm-unknown-linux-musleabi.musl-root",
   "arm-unknown-linux-musleabi install directory")
 v("musl-root-armhf", "target.arm-unknown-linux-musleabihf.musl-root",
   "arm-unknown-linux-musleabihf install directory")
+v("musl-root-armv5te", "target.armv5te-unknown-linux-musleabi.musl-root",
+  "armv5te-unknown-linux-musleabi install directory")
 v("musl-root-armv7", "target.armv7-unknown-linux-musleabihf.musl-root",
   "armv7-unknown-linux-musleabihf install directory")
 v("musl-root-aarch64", "target.aarch64-unknown-linux-musl.musl-root",

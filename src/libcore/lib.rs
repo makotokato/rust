@@ -50,6 +50,15 @@
 
 // Since libcore defines many fundamental lang items, all tests live in a
 // separate crate, libcoretest, to avoid bizarre issues.
+//
+// Here we explicitly #[cfg]-out this whole crate when testing. If we don't do
+// this, both the generated test artifact and the linked libtest (which
+// transitively includes libcore) will both define the same set of lang items,
+// and this will cause the E0152 "duplicate lang item found" error. See
+// discussion in #50466 for details.
+//
+// This cfg won't affect doc tests.
+#![cfg(not(test))]
 
 #![stable(feature = "core", since = "1.6.0")]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
@@ -68,20 +77,21 @@
 #![feature(asm)]
 #![feature(associated_type_defaults)]
 #![feature(attr_literals)]
-#![feature(cfg_target_feature)]
 #![feature(cfg_target_has_atomic)]
 #![feature(concat_idents)]
 #![feature(const_fn)]
+#![feature(core_float)]
 #![feature(custom_attribute)]
 #![feature(doc_cfg)]
 #![feature(doc_spotlight)]
-#![feature(fn_must_use)]
+#![feature(extern_types)]
 #![feature(fundamental)]
 #![feature(intrinsics)]
 #![feature(iterator_flatten)]
 #![feature(iterator_repeat_with)]
 #![feature(lang_items)]
 #![feature(link_llvm_intrinsics)]
+#![feature(never_type)]
 #![feature(exhaustive_patterns)]
 #![feature(macro_at_most_once_rep)]
 #![feature(no_core)]
@@ -92,13 +102,28 @@
 #![feature(rustc_attrs)]
 #![feature(rustc_const_unstable)]
 #![feature(simd_ffi)]
+#![feature(core_slice_ext)]
+#![feature(core_str_ext)]
 #![feature(specialization)]
 #![feature(staged_api)]
 #![feature(stmt_expr_attributes)]
-#![feature(target_feature)]
 #![feature(unboxed_closures)]
 #![feature(untagged_unions)]
 #![feature(unwind_attributes)]
+#![feature(doc_alias)]
+#![feature(inclusive_range_methods)]
+
+#![cfg_attr(not(stage0), feature(mmx_target_feature))]
+#![cfg_attr(not(stage0), feature(tbm_target_feature))]
+#![cfg_attr(not(stage0), feature(sse4a_target_feature))]
+#![cfg_attr(not(stage0), feature(arm_target_feature))]
+#![cfg_attr(not(stage0), feature(powerpc_target_feature))]
+#![cfg_attr(not(stage0), feature(mips_target_feature))]
+#![cfg_attr(not(stage0), feature(aarch64_target_feature))]
+
+#![cfg_attr(stage0, feature(target_feature))]
+#![cfg_attr(stage0, feature(cfg_target_feature))]
+#![cfg_attr(stage0, feature(fn_must_use))]
 
 #[prelude_import]
 #[allow(unused)]
@@ -148,6 +173,7 @@ pub mod intrinsics;
 pub mod mem;
 pub mod nonzero;
 pub mod ptr;
+pub mod hint;
 
 /* Core language traits */
 
@@ -184,7 +210,14 @@ pub mod unicode;
 
 /* Heap memory allocator trait */
 #[allow(missing_docs)]
-pub mod heap;
+pub mod alloc;
+
+#[unstable(feature = "allocator_api", issue = "32838")]
+#[rustc_deprecated(since = "1.27.0", reason = "module renamed to `alloc`")]
+/// Use the `alloc` module instead.
+pub mod heap {
+    pub use alloc::*;
+}
 
 // note: does not need to be public
 mod iter_private;
@@ -196,8 +229,22 @@ mod unit;
 // things like SIMD and such. Note that the actual source for all this lies in a
 // different repository, rust-lang-nursery/stdsimd. That's why the setup here is
 // a bit wonky.
+#[allow(unused_macros)]
+macro_rules! test_v16 { ($item:item) => {}; }
+#[allow(unused_macros)]
+macro_rules! test_v32 { ($item:item) => {}; }
+#[allow(unused_macros)]
+macro_rules! test_v64 { ($item:item) => {}; }
+#[allow(unused_macros)]
+macro_rules! test_v128 { ($item:item) => {}; }
+#[allow(unused_macros)]
+macro_rules! test_v256 { ($item:item) => {}; }
+#[allow(unused_macros)]
+macro_rules! test_v512 { ($item:item) => {}; }
+#[allow(unused_macros)]
+macro_rules! vector_impl { ($([$f:ident, $($args:tt)*]),*) => { $($f!($($args)*);)* } }
 #[path = "../stdsimd/coresimd/mod.rs"]
-#[allow(missing_docs, missing_debug_implementations, dead_code)]
+#[allow(missing_docs, missing_debug_implementations, dead_code, unused_imports)]
 #[unstable(feature = "stdsimd", issue = "48556")]
 #[cfg(not(stage0))] // allow changes to how stdsimd works in stage0
 mod coresimd;
@@ -205,6 +252,6 @@ mod coresimd;
 #[unstable(feature = "stdsimd", issue = "48556")]
 #[cfg(not(stage0))]
 pub use coresimd::simd;
-#[unstable(feature = "stdsimd", issue = "48556")]
+#[stable(feature = "simd_arch", since = "1.27.0")]
 #[cfg(not(stage0))]
 pub use coresimd::arch;

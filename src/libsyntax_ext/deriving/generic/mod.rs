@@ -191,7 +191,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::vec;
 
-use syntax::abi::Abi;
+use rustc_target::spec::abi::Abi;
 use syntax::ast::{
     self, BinOpKind, EnumDef, Expr, GenericParam, Generics, Ident, PatKind, VariantData
 };
@@ -252,7 +252,7 @@ pub struct MethodDef<'a> {
     pub explicit_self: Option<Option<PtrTy<'a>>>,
 
     /// Arguments other than the self argument
-    pub args: Vec<Ty<'a>>,
+    pub args: Vec<(Ty<'a>, &'a str)>,
 
     /// Return type
     pub ret_ty: Ty<'a>,
@@ -472,7 +472,7 @@ impl<'a> TraitDef<'a> {
                 attrs.extend(item.attrs
                     .iter()
                     .filter(|a| {
-                        a.name().is_some() && match &*a.name().unwrap().as_str() {
+                        match &*a.name().as_str() {
                             "allow" | "warn" | "deny" | "forbid" | "stable" | "unstable" => true,
                             _ => false,
                         }
@@ -915,9 +915,9 @@ impl<'a> MethodDef<'a> {
             explicit_self
         });
 
-        for (i, ty) in self.args.iter().enumerate() {
+        for (ty, name) in self.args.iter() {
             let ast_ty = ty.to_ty(cx, trait_.span, type_ident, generics);
-            let ident = cx.ident_of(&format!("__arg_{}", i));
+            let ident = cx.ident_of(name).gensym();
             arg_tys.push((ident, ast_ty));
 
             let arg_expr = cx.expr_ident(trait_.span, ident);
@@ -1004,10 +1004,10 @@ impl<'a> MethodDef<'a> {
     ///
     /// // equivalent to:
     /// impl PartialEq for A {
-    ///     fn eq(&self, __arg_1: &A) -> bool {
+    ///     fn eq(&self, other: &A) -> bool {
     ///         match *self {
     ///             A {x: ref __self_0_0, y: ref __self_0_1} => {
-    ///                 match *__arg_1 {
+    ///                 match *other {
     ///                     A {x: ref __self_1_0, y: ref __self_1_1} => {
     ///                         __self_0_0.eq(__self_1_0) && __self_0_1.eq(__self_1_1)
     ///                     }
@@ -1020,10 +1020,10 @@ impl<'a> MethodDef<'a> {
     /// // or if A is repr(packed) - note fields are matched by-value
     /// // instead of by-reference.
     /// impl PartialEq for A {
-    ///     fn eq(&self, __arg_1: &A) -> bool {
+    ///     fn eq(&self, other: &A) -> bool {
     ///         match *self {
     ///             A {x: __self_0_0, y: __self_0_1} => {
-    ///                 match __arg_1 {
+    ///                 match other {
     ///                     A {x: __self_1_0, y: __self_1_1} => {
     ///                         __self_0_0.eq(&__self_1_0) && __self_0_1.eq(&__self_1_1)
     ///                     }
@@ -1134,14 +1134,14 @@ impl<'a> MethodDef<'a> {
     /// // is equivalent to
     ///
     /// impl PartialEq for A {
-    ///     fn eq(&self, __arg_1: &A) -> ::bool {
-    ///         match (&*self, &*__arg_1) {
+    ///     fn eq(&self, other: &A) -> ::bool {
+    ///         match (&*self, &*other) {
     ///             (&A1, &A1) => true,
     ///             (&A2(ref self_0),
     ///              &A2(ref __arg_1_0)) => (*self_0).eq(&(*__arg_1_0)),
     ///             _ => {
     ///                 let __self_vi = match *self { A1(..) => 0, A2(..) => 1 };
-    ///                 let __arg_1_vi = match *__arg_1 { A1(..) => 0, A2(..) => 1 };
+    ///                 let __arg_1_vi = match *other { A1(..) => 0, A2(..) => 1 };
     ///                 false
     ///             }
     ///         }
@@ -1240,7 +1240,7 @@ impl<'a> MethodDef<'a> {
         let vi_idents: Vec<ast::Ident> = self_arg_names.iter()
             .map(|name| {
                 let vi_suffix = format!("{}_vi", &name[..]);
-                cx.ident_of(&vi_suffix[..])
+                cx.ident_of(&vi_suffix[..]).gensym()
             })
             .collect::<Vec<ast::Ident>>();
 
@@ -1616,7 +1616,7 @@ impl<'a> TraitDef<'a> {
         let mut ident_exprs = Vec::new();
         for (i, struct_field) in struct_def.fields().iter().enumerate() {
             let sp = struct_field.span.with_ctxt(self.span.ctxt());
-            let ident = cx.ident_of(&format!("{}_{}", prefix, i));
+            let ident = cx.ident_of(&format!("{}_{}", prefix, i)).gensym();
             paths.push(ident.with_span_pos(sp));
             let val = cx.expr_path(cx.path_ident(sp, ident));
             let val = if use_temporaries {
@@ -1680,12 +1680,55 @@ impl<'a> TraitDef<'a> {
 
 // helpful premade recipes
 
+pub fn cs_fold_fields<'a, F>(use_foldl: bool,
+                             mut f: F,
+                             base: P<Expr>,
+                             cx: &mut ExtCtxt,
+                             all_fields: &[FieldInfo<'a>])
+                             -> P<Expr>
+    where F: FnMut(&mut ExtCtxt, Span, P<Expr>, P<Expr>, &[P<Expr>]) -> P<Expr>
+{
+    if use_foldl {
+        all_fields.iter().fold(base, |old, field| {
+            f(cx, field.span, old, field.self_.clone(), &field.other)
+        })
+    } else {
+        all_fields.iter().rev().fold(base, |old, field| {
+            f(cx, field.span, old, field.self_.clone(), &field.other)
+        })
+    }
+}
+
+pub fn cs_fold_enumnonmatch(mut enum_nonmatch_f: EnumNonMatchCollapsedFunc,
+                            cx: &mut ExtCtxt,
+                            trait_span: Span,
+                            substructure: &Substructure)
+                            -> P<Expr>
+{
+    match *substructure.fields {
+        EnumNonMatchingCollapsed(ref all_args, _, tuple) => {
+            enum_nonmatch_f(cx,
+                            trait_span,
+                            (&all_args[..], tuple),
+                            substructure.nonself_args)
+        }
+        _ => cx.span_bug(trait_span, "cs_fold_enumnonmatch expected an EnumNonMatchingCollapsed")
+    }
+}
+
+pub fn cs_fold_static(cx: &mut ExtCtxt,
+                      trait_span: Span)
+                      -> P<Expr>
+{
+    cx.span_bug(trait_span, "static function in `derive`")
+}
+
 /// Fold the fields. `use_foldl` controls whether this is done
 /// left-to-right (`true`) or right-to-left (`false`).
 pub fn cs_fold<F>(use_foldl: bool,
-                  mut f: F,
+                  f: F,
                   base: P<Expr>,
-                  mut enum_nonmatch_f: EnumNonMatchCollapsedFunc,
+                  enum_nonmatch_f: EnumNonMatchCollapsedFunc,
                   cx: &mut ExtCtxt,
                   trait_span: Span,
                   substructure: &Substructure)
@@ -1695,26 +1738,65 @@ pub fn cs_fold<F>(use_foldl: bool,
     match *substructure.fields {
         EnumMatching(.., ref all_fields) |
         Struct(_, ref all_fields) => {
-            if use_foldl {
-                all_fields.iter().fold(base, |old, field| {
-                    f(cx, field.span, old, field.self_.clone(), &field.other)
-                })
-            } else {
-                all_fields.iter().rev().fold(base, |old, field| {
-                    f(cx, field.span, old, field.self_.clone(), &field.other)
-                })
-            }
+            cs_fold_fields(use_foldl, f, base, cx, all_fields)
         }
-        EnumNonMatchingCollapsed(ref all_args, _, tuple) => {
-            enum_nonmatch_f(cx,
-                            trait_span,
-                            (&all_args[..], tuple),
-                            substructure.nonself_args)
+        EnumNonMatchingCollapsed(..) => {
+            cs_fold_enumnonmatch(enum_nonmatch_f, cx, trait_span, substructure)
         }
-        StaticEnum(..) | StaticStruct(..) => cx.span_bug(trait_span, "static function in `derive`"),
+        StaticEnum(..) | StaticStruct(..) => {
+            cs_fold_static(cx, trait_span)
+        }
     }
 }
 
+/// Function to fold over fields, with three cases, to generate more efficient and concise code.
+/// When the `substructure` has grouped fields, there are two cases:
+/// Zero fields: call the base case function with None (like the usual base case of `cs_fold`).
+/// One or more fields: call the base case function on the first value (which depends on
+/// `use_fold`), and use that as the base case. Then perform `cs_fold` on the remainder of the
+/// fields.
+/// When the `substructure` is a `EnumNonMatchingCollapsed`, the result of `enum_nonmatch_f`
+/// is returned. Statics may not be folded over.
+/// See `cs_op` in `partial_ord.rs` for a model example.
+pub fn cs_fold1<F, B>(use_foldl: bool,
+                      f: F,
+                      mut b: B,
+                      enum_nonmatch_f: EnumNonMatchCollapsedFunc,
+                      cx: &mut ExtCtxt,
+                      trait_span: Span,
+                      substructure: &Substructure)
+                      -> P<Expr>
+    where F: FnMut(&mut ExtCtxt, Span, P<Expr>, P<Expr>, &[P<Expr>]) -> P<Expr>,
+          B: FnMut(&mut ExtCtxt, Option<(Span, P<Expr>, &[P<Expr>])>) -> P<Expr>
+{
+    match *substructure.fields {
+        EnumMatching(.., ref all_fields) |
+        Struct(_, ref all_fields) => {
+            let (base, all_fields) = match (all_fields.is_empty(), use_foldl) {
+                (false, true) => {
+                    let field = &all_fields[0];
+                    let args = (field.span, field.self_.clone(), &field.other[..]);
+                    (b(cx, Some(args)), &all_fields[1..])
+                }
+                (false, false) => {
+                    let idx = all_fields.len() - 1;
+                    let field = &all_fields[idx];
+                    let args = (field.span, field.self_.clone(), &field.other[..]);
+                    (b(cx, Some(args)), &all_fields[..idx])
+                }
+                (true, _) => (b(cx, None), &all_fields[..])
+            };
+
+            cs_fold_fields(use_foldl, f, base, cx, all_fields)
+        }
+        EnumNonMatchingCollapsed(..) => {
+            cs_fold_enumnonmatch(enum_nonmatch_f, cx, trait_span, substructure)
+        }
+        StaticEnum(..) | StaticStruct(..) => {
+            cs_fold_static(cx, trait_span)
+        }
+    }
+}
 
 /// Call the method that is being derived on all the fields, and then
 /// process the collected results. i.e.

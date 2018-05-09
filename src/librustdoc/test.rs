@@ -24,11 +24,11 @@ use rustc_lint;
 use rustc::hir;
 use rustc::hir::intravisit;
 use rustc::session::{self, CompileIncomplete, config};
-use rustc::session::config::{OutputType, OutputTypes, Externs};
+use rustc::session::config::{OutputType, OutputTypes, Externs, CodegenOptions};
 use rustc::session::search_paths::{SearchPaths, PathKind};
 use rustc_metadata::dynamic_lib::DynamicLibrary;
 use tempdir::TempDir;
-use rustc_driver::{self, driver, Compilation};
+use rustc_driver::{self, driver, target_features, Compilation};
 use rustc_driver::driver::phase_2_configure_and_expand;
 use rustc_metadata::cstore::CStore;
 use rustc_resolve::MakeGlobMap;
@@ -64,7 +64,8 @@ pub fn run(input_path: &Path,
            maybe_sysroot: Option<PathBuf>,
            display_warnings: bool,
            linker: Option<PathBuf>,
-           edition: Edition)
+           edition: Edition,
+           cg: CodegenOptions)
            -> isize {
     let input = config::Input::File(input_path.to_owned());
 
@@ -73,14 +74,15 @@ pub fn run(input_path: &Path,
             || Some(env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf())),
         search_paths: libs.clone(),
         crate_types: vec![config::CrateTypeDylib],
+        cg: cg.clone(),
         externs: externs.clone(),
         unstable_features: UnstableFeatures::from_environment(),
         lint_cap: Some(::rustc::lint::Level::Allow),
         actually_rustdoc: true,
         debugging_opts: config::DebuggingOptions {
-            edition,
             ..config::basic_debugging_options()
         },
+        edition,
         ..config::basic_options().clone()
     };
 
@@ -96,8 +98,10 @@ pub fn run(input_path: &Path,
     let trans = rustc_driver::get_trans(&sess);
     let cstore = CStore::new(trans.metadata_loader());
     rustc_lint::register_builtins(&mut sess.lint_store.borrow_mut(), Some(&sess));
-    sess.parse_sess.config =
-        config::build_configuration(&sess, config::parse_cfgspecs(cfgs.clone()));
+
+    let mut cfg = config::build_configuration(&sess, config::parse_cfgspecs(cfgs.clone()));
+    target_features::add_configuration(&mut cfg, &sess, &*trans);
+    sess.parse_sess.config = cfg;
 
     let krate = panictry!(driver::phase_1_parse_input(&driver::CompileController::basic(),
                                                       &sess,
@@ -123,6 +127,7 @@ pub fn run(input_path: &Path,
     let mut collector = Collector::new(crate_name,
                                        cfgs,
                                        libs,
+                                       cg,
                                        externs,
                                        false,
                                        opts,
@@ -188,7 +193,7 @@ fn scrape_test_config(krate: &::rustc::hir::Crate) -> TestOptions {
 
 fn run_test(test: &str, cratename: &str, filename: &FileName, line: usize,
             cfgs: Vec<String>, libs: SearchPaths,
-            externs: Externs,
+            cg: CodegenOptions, externs: Externs,
             should_panic: bool, no_run: bool, as_test_harness: bool,
             compile_fail: bool, mut error_codes: Vec<String>, opts: &TestOptions,
             maybe_sysroot: Option<PathBuf>, linker: Option<PathBuf>, edition: Edition) {
@@ -213,14 +218,14 @@ fn run_test(test: &str, cratename: &str, filename: &FileName, line: usize,
         cg: config::CodegenOptions {
             prefer_dynamic: true,
             linker,
-            .. config::basic_codegen_options()
+            ..cg
         },
         test: as_test_harness,
         unstable_features: UnstableFeatures::from_environment(),
         debugging_opts: config::DebuggingOptions {
-            edition,
             ..config::basic_debugging_options()
         },
+        edition,
         ..config::basic_options().clone()
     };
 
@@ -271,8 +276,11 @@ fn run_test(test: &str, cratename: &str, filename: &FileName, line: usize,
     let outdir = Mutex::new(TempDir::new("rustdoctest").ok().expect("rustdoc needs a tempdir"));
     let libdir = sess.target_filesearch(PathKind::All).get_lib_path();
     let mut control = driver::CompileController::basic();
-    sess.parse_sess.config =
-        config::build_configuration(&sess, config::parse_cfgspecs(cfgs.clone()));
+
+    let mut cfg = config::build_configuration(&sess, config::parse_cfgspecs(cfgs.clone()));
+    target_features::add_configuration(&mut cfg, &sess, &*trans);
+    sess.parse_sess.config = cfg;
+
     let out = Some(outdir.lock().unwrap().path().to_path_buf());
 
     if no_run {
@@ -429,7 +437,7 @@ fn partition_source(s: &str) -> (String, String) {
 
     for line in s.lines() {
         let trimline = line.trim();
-        let header = trimline.is_whitespace() ||
+        let header = trimline.chars().all(|c| c.is_whitespace()) ||
             trimline.starts_with("#![") ||
             trimline.starts_with("#[macro_use] extern crate") ||
             trimline.starts_with("extern crate");
@@ -473,6 +481,7 @@ pub struct Collector {
 
     cfgs: Vec<String>,
     libs: SearchPaths,
+    cg: CodegenOptions,
     externs: Externs,
     use_headers: bool,
     cratename: String,
@@ -486,15 +495,16 @@ pub struct Collector {
 }
 
 impl Collector {
-    pub fn new(cratename: String, cfgs: Vec<String>, libs: SearchPaths, externs: Externs,
-               use_headers: bool, opts: TestOptions, maybe_sysroot: Option<PathBuf>,
-               codemap: Option<Lrc<CodeMap>>, filename: Option<PathBuf>,
-               linker: Option<PathBuf>, edition: Edition) -> Collector {
+    pub fn new(cratename: String, cfgs: Vec<String>, libs: SearchPaths, cg: CodegenOptions,
+               externs: Externs, use_headers: bool, opts: TestOptions,
+               maybe_sysroot: Option<PathBuf>, codemap: Option<Lrc<CodeMap>>,
+               filename: Option<PathBuf>, linker: Option<PathBuf>, edition: Edition) -> Collector {
         Collector {
             tests: Vec::new(),
             names: Vec::new(),
             cfgs,
             libs,
+            cg,
             externs,
             use_headers,
             cratename,
@@ -519,6 +529,7 @@ impl Collector {
         let name = self.generate_name(line, &filename);
         let cfgs = self.cfgs.clone();
         let libs = self.libs.clone();
+        let cg = self.cg.clone();
         let externs = self.externs.clone();
         let cratename = self.cratename.to_string();
         let opts = self.opts.clone();
@@ -547,6 +558,7 @@ impl Collector {
                                  line,
                                  cfgs,
                                  libs,
+                                 cg,
                                  externs,
                                  should_panic,
                                  no_run,

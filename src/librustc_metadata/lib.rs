@@ -38,13 +38,12 @@ extern crate proc_macro;
 
 #[macro_use]
 extern crate rustc;
-extern crate rustc_back;
+extern crate rustc_target;
 #[macro_use]
 extern crate rustc_data_structures;
 
 mod diagnostics;
 
-mod astencode;
 mod index_builder;
 mod index;
 mod encoder;

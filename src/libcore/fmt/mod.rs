@@ -542,11 +542,12 @@ impl<'a> Display for Arguments<'a> {
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_on_unimplemented(
-    on(crate_local, label="`{Self}` cannot be formatted using `:?`; \
-                            add `#[derive(Debug)]` or manually implement `{Debug}`"),
+    on(crate_local, label="`{Self}` cannot be formatted using `{{:?}}`",
+                    note="add `#[derive(Debug)]` or manually implement `{Debug}`"),
     message="`{Self}` doesn't implement `{Debug}`",
-    label="`{Self}` cannot be formatted using `:?` because it doesn't implement `{Debug}`",
+    label="`{Self}` cannot be formatted using `{{:?}}` because it doesn't implement `{Debug}`",
 )]
+#[doc(alias = "{:?}")]
 #[lang = "debug_trait"]
 pub trait Debug {
     /// Formats the value using the given formatter.
@@ -609,9 +610,11 @@ pub trait Debug {
 /// ```
 #[rustc_on_unimplemented(
     message="`{Self}` doesn't implement `{Display}`",
-    label="`{Self}` cannot be formatted with the default formatter; \
-           try using `:?` instead if you are using a format string",
+    label="`{Self}` cannot be formatted with the default formatter",
+    note="in format strings you may be able to use `{{:?}}` \
+          (or {{:#?}} for pretty-print) instead",
 )]
+#[doc(alias = "{}")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Display {
     /// Formats the value using the given formatter.
@@ -1212,7 +1215,11 @@ impl<'a> Formatter<'a> {
             // truncation. However other flags like `fill`, `width` and `align`
             // must act as always.
             if let Some((i, _)) = s.char_indices().skip(max).next() {
-                &s[..i]
+                // LLVM here can't prove that `..i` won't panic `&s[..i]`, but
+                // we know that it can't panic. Use `get` + `unwrap_or` to avoid
+                // `unsafe` and otherwise don't emit any panic-related code
+                // here.
+                s.get(..i).unwrap_or(&s)
             } else {
                 &s
             }
@@ -1776,14 +1783,14 @@ macro_rules! fmt_refs {
 
 fmt_refs! { Debug, Display, Octal, Binary, LowerHex, UpperHex, LowerExp, UpperExp }
 
-#[stable(feature = "never_type", since = "1.26.0")]
+#[unstable(feature = "never_type", issue = "35121")]
 impl Debug for ! {
     fn fmt(&self, _: &mut Formatter) -> Result {
         *self
     }
 }
 
-#[stable(feature = "never_type", since = "1.26.0")]
+#[unstable(feature = "never_type", issue = "35121")]
 impl Display for ! {
     fn fmt(&self, _: &mut Formatter) -> Result {
         *self

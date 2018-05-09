@@ -143,7 +143,7 @@ impl ExpansionKind {
     }
 
     fn expect_from_annotatables<I: IntoIterator<Item = Annotatable>>(self, items: I) -> Expansion {
-        let items = items.into_iter();
+        let mut items = items.into_iter();
         match self {
             ExpansionKind::Items =>
                 Expansion::Items(items.map(Annotatable::expect_item).collect()),
@@ -153,7 +153,14 @@ impl ExpansionKind {
                 Expansion::TraitItems(items.map(Annotatable::expect_trait_item).collect()),
             ExpansionKind::ForeignItems =>
                 Expansion::ForeignItems(items.map(Annotatable::expect_foreign_item).collect()),
-            _ => unreachable!(),
+            ExpansionKind::Stmts => Expansion::Stmts(items.map(Annotatable::expect_stmt).collect()),
+            ExpansionKind::Expr => Expansion::Expr(
+                items.next().expect("expected exactly one expression").expect_expr()
+            ),
+            ExpansionKind::OptExpr =>
+                Expansion::OptExpr(items.next().map(Annotatable::expect_expr)),
+            ExpansionKind::Pat | ExpansionKind::Ty =>
+                panic!("patterns and types aren't annotatable"),
         }
     }
 }
@@ -514,6 +521,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                 Some(kind.expect_from_annotatables(items))
             }
             AttrProcMacro(ref mac) => {
+                self.gate_proc_macro_attr_item(attr.span, &item);
                 let item_tok = TokenTree::Token(DUMMY_SP, Token::interpolated(match item {
                     Annotatable::Item(item) => token::NtItem(item),
                     Annotatable::TraitItem(item) => token::NtTraitItem(item.into_inner()),
@@ -522,7 +530,8 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                     Annotatable::Stmt(stmt) => token::NtStmt(stmt.into_inner()),
                     Annotatable::Expr(expr) => token::NtExpr(expr),
                 })).into();
-                let tok_result = mac.expand(self.cx, attr.span, attr.tokens, item_tok);
+                let input = self.extract_proc_macro_attr_input(attr.tokens, attr.span);
+                let tok_result = mac.expand(self.cx, attr.span, input, item_tok);
                 self.parse_expansion(tok_result, kind, &attr.path, attr.span)
             }
             ProcMacroDerive(..) | BuiltinDerive(..) => {
@@ -537,6 +546,49 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                 kind.dummy(attr.span)
             }
         }
+    }
+
+    fn extract_proc_macro_attr_input(&self, tokens: TokenStream, span: Span) -> TokenStream {
+        let mut trees = tokens.trees();
+        match trees.next() {
+            Some(TokenTree::Delimited(_, delim)) => {
+                if trees.next().is_none() {
+                    return delim.tts.into()
+                }
+            }
+            Some(TokenTree::Token(..)) => {}
+            None => return TokenStream::empty(),
+        }
+        self.cx.span_err(span, "custom attribute invocations must be \
+            of the form #[foo] or #[foo(..)], the macro name must only be \
+            followed by a delimiter token");
+        TokenStream::empty()
+    }
+
+    fn gate_proc_macro_attr_item(&self, span: Span, item: &Annotatable) {
+        let (kind, gate) = match *item {
+            Annotatable::Item(ref item) => {
+                match item.node {
+                    ItemKind::Mod(_) if self.cx.ecfg.proc_macro_mod() => return,
+                    ItemKind::Mod(_) => ("modules", "proc_macro_mod"),
+                    _ => return,
+                }
+            }
+            Annotatable::TraitItem(_) => return,
+            Annotatable::ImplItem(_) => return,
+            Annotatable::ForeignItem(_) => return,
+            Annotatable::Stmt(_) |
+            Annotatable::Expr(_) if self.cx.ecfg.proc_macro_expr() => return,
+            Annotatable::Stmt(_) => ("statements", "proc_macro_expr"),
+            Annotatable::Expr(_) => ("expressions", "proc_macro_expr"),
+        };
+        emit_feature_err(
+            self.cx.parse_sess,
+            gate,
+            span,
+            GateIssue::Language,
+            &format!("custom attributes cannot be applied to {}", kind),
+        );
     }
 
     /// Expand a macro invocation. Returns the result of expansion.
@@ -665,6 +717,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                     self.cx.trace_macros_diag();
                     kind.dummy(span)
                 } else {
+                    self.gate_proc_macro_expansion_kind(span, kind);
                     invoc.expansion_data.mark.set_expn_info(ExpnInfo {
                         call_site: span,
                         callee: NameAndSpan {
@@ -693,6 +746,30 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
             self.cx.trace_macros_diag();
             kind.dummy(span)
         }
+    }
+
+    fn gate_proc_macro_expansion_kind(&self, span: Span, kind: ExpansionKind) {
+        let kind = match kind {
+            ExpansionKind::Expr => "expressions",
+            ExpansionKind::OptExpr => "expressions",
+            ExpansionKind::Pat => "patterns",
+            ExpansionKind::Ty => "types",
+            ExpansionKind::Stmts => "statements",
+            ExpansionKind::Items => return,
+            ExpansionKind::TraitItems => return,
+            ExpansionKind::ImplItems => return,
+            ExpansionKind::ForeignItems => return,
+        };
+        if self.cx.ecfg.proc_macro_non_items() {
+            return
+        }
+        emit_feature_err(
+            self.cx.parse_sess,
+            "proc_macro_non_items",
+            span,
+            GateIssue::Language,
+            &format!("procedural macros cannot be expanded to {}", kind),
+        );
     }
 
     /// Expand a derive invocation. Returns the result of expansion.
@@ -733,7 +810,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                 invoc.expansion_data.mark.set_expn_info(expn_info);
                 let span = span.with_ctxt(self.cx.backtrace());
                 let dummy = ast::MetaItem { // FIXME(jseyfried) avoid this
-                    ident: keywords::Invalid.ident(),
+                    ident: Path::from_ident(keywords::Invalid.ident()),
                     span: DUMMY_SP,
                     node: ast::MetaItemKind::Word,
                 };
@@ -886,14 +963,15 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
         self.collect(kind, InvocationKind::Attr { attr, traits, item })
     }
 
-    // If `item` is an attr invocation, remove and return the macro attribute.
+    /// If `item` is an attr invocation, remove and return the macro attribute and derive traits.
     fn classify_item<T>(&mut self, mut item: T) -> (Option<ast::Attribute>, Vec<Path>, T)
         where T: HasAttrs,
     {
         let (mut attr, mut traits) = (None, Vec::new());
 
         item = item.map_attrs(|mut attrs| {
-            if let Some(legacy_attr_invoc) = self.cx.resolver.find_legacy_attr_invoc(&mut attrs) {
+            if let Some(legacy_attr_invoc) = self.cx.resolver.find_legacy_attr_invoc(&mut attrs,
+                                                                                     true) {
                 attr = Some(legacy_attr_invoc);
                 return attrs;
             }
@@ -908,6 +986,28 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
         (attr, traits, item)
     }
 
+    /// Alternative of `classify_item()` that ignores `#[derive]` so invocations fallthrough
+    /// to the unused-attributes lint (making it an error on statements and expressions
+    /// is a breaking change)
+    fn classify_nonitem<T: HasAttrs>(&mut self, mut item: T) -> (Option<ast::Attribute>, T) {
+        let mut attr = None;
+
+        item = item.map_attrs(|mut attrs| {
+            if let Some(legacy_attr_invoc) = self.cx.resolver.find_legacy_attr_invoc(&mut attrs,
+                                                                                     false) {
+                attr = Some(legacy_attr_invoc);
+                return attrs;
+            }
+
+            if self.cx.ecfg.proc_macro_enabled() {
+                attr = find_attr_invoc(&mut attrs);
+            }
+            attrs
+        });
+
+        (attr, item)
+    }
+
     fn configure<T: HasAttrs>(&mut self, node: T) -> Option<T> {
         self.cfg.configure(node)
     }
@@ -917,12 +1017,23 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
     fn check_attributes(&mut self, attrs: &[ast::Attribute]) {
         let features = self.cx.ecfg.features.unwrap();
         for attr in attrs.iter() {
-            feature_gate::check_attribute(attr, self.cx.parse_sess, features);
+            self.check_attribute_inner(attr, features);
+
+            // macros are expanded before any lint passes so this warning has to be hardcoded
+            if attr.path == "derive" {
+                self.cx.struct_span_warn(attr.span, "`#[derive]` does nothing on macro invocations")
+                    .note("this may become a hard error in a future release")
+                    .emit();
+            }
         }
     }
 
     fn check_attribute(&mut self, at: &ast::Attribute) {
         let features = self.cx.ecfg.features.unwrap();
+        self.check_attribute_inner(at, features);
+    }
+
+    fn check_attribute_inner(&mut self, at: &ast::Attribute, features: &Features) {
         feature_gate::check_attribute(at, self.cx.parse_sess, features);
     }
 }
@@ -938,15 +1049,16 @@ impl<'a, 'b> Folder for InvocationCollector<'a, 'b> {
         let mut expr = self.cfg.configure_expr(expr).into_inner();
         expr.node = self.cfg.configure_expr_kind(expr.node);
 
-        let (attr, derives, expr) = self.classify_item(expr);
+        // ignore derives so they remain unused
+        let (attr, expr) = self.classify_nonitem(expr);
 
-        if attr.is_some() || !derives.is_empty() {
+        if attr.is_some() {
             // collect the invoc regardless of whether or not attributes are permitted here
             // expansion will eat the attribute so it won't error later
             attr.as_ref().map(|a| self.cfg.maybe_emit_expr_attr_err(a));
 
             // ExpansionKind::Expr requires the macro to emit an expression
-            return self.collect_attr(attr, derives, Annotatable::Expr(P(expr)), ExpansionKind::Expr)
+            return self.collect_attr(attr, vec![], Annotatable::Expr(P(expr)), ExpansionKind::Expr)
                 .make_expr();
         }
 
@@ -962,12 +1074,13 @@ impl<'a, 'b> Folder for InvocationCollector<'a, 'b> {
         let mut expr = configure!(self, expr).into_inner();
         expr.node = self.cfg.configure_expr_kind(expr.node);
 
-        let (attr, derives, expr) = self.classify_item(expr);
+        // ignore derives so they remain unused
+        let (attr, expr) = self.classify_nonitem(expr);
 
-        if attr.is_some() || !derives.is_empty() {
+        if attr.is_some() {
             attr.as_ref().map(|a| self.cfg.maybe_emit_expr_attr_err(a));
 
-            return self.collect_attr(attr, derives, Annotatable::Expr(P(expr)),
+            return self.collect_attr(attr, vec![], Annotatable::Expr(P(expr)),
                                      ExpansionKind::OptExpr)
                 .make_opt_expr();
         }
@@ -1001,7 +1114,14 @@ impl<'a, 'b> Folder for InvocationCollector<'a, 'b> {
 
         // we'll expand attributes on expressions separately
         if !stmt.is_expr() {
-            let (attr, derives, stmt_) = self.classify_item(stmt);
+            let (attr, derives, stmt_) = if stmt.is_item() {
+                self.classify_item(stmt)
+            } else {
+                // ignore derives on non-item statements so it falls through
+                // to the unused-attributes lint
+                let (attr, stmt) = self.classify_nonitem(stmt);
+                (attr, vec![], stmt)
+            };
 
             if attr.is_some() || !derives.is_empty() {
                 return self.collect_attr(attr, derives,
@@ -1370,6 +1490,9 @@ impl<'feat> ExpansionConfig<'feat> {
         fn enable_custom_derive = custom_derive,
         fn proc_macro_enabled = proc_macro,
         fn macros_in_extern_enabled = macros_in_extern,
+        fn proc_macro_mod = proc_macro_mod,
+        fn proc_macro_expr = proc_macro_expr,
+        fn proc_macro_non_items = proc_macro_non_items,
     }
 }
 

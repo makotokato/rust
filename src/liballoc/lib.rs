@@ -57,7 +57,7 @@
 //!
 //! ## Heap interfaces
 //!
-//! The [`heap`](heap/index.html) module defines the low-level interface to the
+//! The [`alloc`](alloc/index.html) module defines the low-level interface to the
 //! default global allocator. It is not compatible with the libc allocator API.
 
 #![allow(unused_attributes)]
@@ -75,7 +75,7 @@
 #![deny(missing_debug_implementations)]
 
 #![cfg_attr(test, allow(deprecated))] // rand
-#![cfg_attr(not(test), feature(core_float))]
+#![cfg_attr(all(not(test), stage0), feature(float_internals))]
 #![cfg_attr(not(test), feature(exact_size_is_empty))]
 #![cfg_attr(not(test), feature(generator_trait))]
 #![cfg_attr(test, feature(rand, test))]
@@ -90,13 +90,17 @@
 #![feature(collections_range)]
 #![feature(const_fn)]
 #![feature(core_intrinsics)]
+#![cfg_attr(stage0, feature(core_slice_ext))]
+#![cfg_attr(stage0, feature(core_str_ext))]
 #![feature(custom_attribute)]
 #![feature(dropck_eyepatch)]
 #![feature(exact_size_is_empty)]
 #![feature(fmt_internals)]
+#![cfg_attr(stage0, feature(fn_must_use))]
 #![feature(from_ref)]
 #![feature(fundamental)]
 #![feature(lang_items)]
+#![feature(libc)]
 #![feature(needs_allocator)]
 #![feature(nonzero)]
 #![feature(optin_builtin_traits)]
@@ -106,7 +110,6 @@
 #![feature(ptr_offset_from)]
 #![feature(rustc_attrs)]
 #![feature(slice_get_slice)]
-#![feature(slice_rsplit)]
 #![feature(specialization)]
 #![feature(staged_api)]
 #![feature(str_internals)]
@@ -119,10 +122,11 @@
 #![feature(on_unimplemented)]
 #![feature(exact_chunks)]
 #![feature(pointer_methods)]
-#![feature(inclusive_range_fields)]
+#![feature(inclusive_range_methods)]
 #![cfg_attr(stage0, feature(generic_param_attrs))]
+#![feature(rustc_const_unstable)]
 
-#![cfg_attr(not(test), feature(fn_traits, swap_with_slice, i128))]
+#![cfg_attr(not(test), feature(fn_traits, i128))]
 #![cfg_attr(test, feature(test))]
 
 // Allow testing this library
@@ -141,10 +145,26 @@ mod macros;
 
 #[rustc_deprecated(since = "1.27.0", reason = "use the heap module in core, alloc, or std instead")]
 #[unstable(feature = "allocator_api", issue = "32838")]
-pub use core::heap as allocator;
+/// Use the `alloc` module instead.
+pub mod allocator {
+    pub use alloc::*;
+}
 
 // Heaps provided for low-level allocation strategies
 
+pub mod alloc;
+
+#[unstable(feature = "allocator_api", issue = "32838")]
+#[rustc_deprecated(since = "1.27.0", reason = "module renamed to `alloc`")]
+/// Use the `alloc` module instead.
+#[cfg(not(stage0))]
+pub mod heap {
+    pub use alloc::*;
+}
+
+#[unstable(feature = "allocator_api", issue = "32838")]
+#[rustc_deprecated(since = "1.27.0", reason = "module renamed to `alloc`")]
+#[cfg(stage0)]
 pub mod heap;
 
 // Primitive types using the heaps above

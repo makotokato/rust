@@ -9,7 +9,6 @@
 // except according to those terms.
 
 use dep_graph::{DepConstructor, DepNode};
-use errors::DiagnosticBuilder;
 use hir::def_id::{CrateNum, DefId, DefIndex};
 use hir::def::{Def, Export};
 use hir::{self, TraitCandidate, ItemLocalId, TransFnAttrs};
@@ -17,9 +16,8 @@ use hir::svh::Svh;
 use infer::canonical::{self, Canonical};
 use lint;
 use middle::borrowck::BorrowCheckResult;
-use middle::cstore::{ExternCrate, LinkagePreference, NativeLibrary,
-                     ExternBodyNestedBodies, ForeignModule};
-use middle::cstore::{NativeLibraryKind, DepKind, CrateSource, ExternConstBody};
+use middle::cstore::{ExternCrate, LinkagePreference, NativeLibrary, ForeignModule};
+use middle::cstore::{NativeLibraryKind, DepKind, CrateSource};
 use middle::privacy::AccessLevels;
 use middle::reachable::ReachableSet;
 use middle::region;
@@ -33,20 +31,21 @@ use mir;
 use mir::interpret::{GlobalId};
 use session::{CompileResult, CrateDisambiguator};
 use session::config::OutputFilenames;
-use traits::Vtable;
-use traits::query::{CanonicalProjectionGoal, CanonicalTyGoal, NoSolution};
+use traits::{self, Vtable};
+use traits::query::{CanonicalPredicateGoal, CanonicalProjectionGoal,
+                    CanonicalTyGoal, NoSolution};
 use traits::query::dropck_outlives::{DtorckConstraint, DropckOutlivesResult};
 use traits::query::normalize::NormalizationResult;
 use traits::specialization_graph;
-use traits::Clause;
+use traits::Clauses;
 use ty::{self, CrateInherentImpls, ParamEnvAnd, Ty, TyCtxt};
 use ty::steal::Steal;
 use ty::subst::Substs;
 use util::nodemap::{DefIdSet, DefIdMap, ItemLocalSet};
-use util::common::{profq_msg, ErrorReported, ProfileQueriesMsg};
+use util::common::{ErrorReported};
 
 use rustc_data_structures::indexed_set::IdxSetBuf;
-use rustc_back::PanicStrategy;
+use rustc_target::spec::PanicStrategy;
 use rustc_data_structures::indexed_vec::IndexVec;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::stable_hasher::StableVec;
@@ -68,7 +67,6 @@ pub use self::plumbing::force_from_dep_node;
 
 mod job;
 pub use self::job::{QueryJob, QueryInfo};
-use self::job::QueryResult;
 
 mod keys;
 pub use self::keys::Key;
@@ -213,7 +211,7 @@ define_maps! { <'tcx>
 
     /// Borrow checks the function body. If this is a closure, returns
     /// additional requirements that the closure's creator must verify.
-    [] fn mir_borrowck: MirBorrowCheck(DefId) -> Option<mir::ClosureRegionRequirements<'tcx>>,
+    [] fn mir_borrowck: MirBorrowCheck(DefId) -> mir::BorrowCheckResult<'tcx>,
 
     /// Gets a complete map from all types to their inherent impls.
     /// Not meant to be used directly outside of coherence.
@@ -254,9 +252,11 @@ define_maps! { <'tcx>
     [] fn item_attrs: ItemAttrs(DefId) -> Lrc<[ast::Attribute]>,
     [] fn trans_fn_attrs: trans_fn_attrs(DefId) -> TransFnAttrs,
     [] fn fn_arg_names: FnArgNames(DefId) -> Vec<ast::Name>,
+    /// Gets the rendered value of the specified constant or associated constant.
+    /// Used by rustdoc.
+    [] fn rendered_const: RenderedConst(DefId) -> String,
     [] fn impl_parent: ImplParent(DefId) -> Option<DefId>,
     [] fn trait_of_item: TraitOfItem(DefId) -> Option<DefId>,
-    [] fn item_body_nested_bodies: ItemBodyNestedBodies(DefId) -> ExternBodyNestedBodies,
     [] fn const_is_rvalue_promotable_to_static: ConstIsRvaluePromotableToStatic(DefId) -> bool,
     [] fn rvalue_promotable_map: RvaluePromotableMap(DefId) -> Lrc<ItemLocalSet>,
     [] fn is_mir_available: IsMirAvailable(DefId) -> bool,
@@ -376,7 +376,6 @@ define_maps! { <'tcx>
     [] fn get_lang_items: get_lang_items_node(CrateNum) -> Lrc<LanguageItems>,
     [] fn defined_lang_items: DefinedLangItems(CrateNum) -> Lrc<Vec<(DefId, usize)>>,
     [] fn missing_lang_items: MissingLangItems(CrateNum) -> Lrc<Vec<LangItem>>,
-    [] fn extern_const_body: ExternConstBody(DefId) -> ExternConstBody<'tcx>,
     [] fn visible_parent_map: visible_parent_map_node(CrateNum)
         -> Lrc<DefIdMap<DefId>>,
     [] fn missing_extern_crate_item: MissingExternCrateItem(CrateNum) -> bool,
@@ -433,11 +432,17 @@ define_maps! { <'tcx>
         NoSolution,
     >,
 
+    /// Do not call this query directly: invoke `infcx.predicate_may_hold()` or
+    /// `infcx.predicate_must_hold()` instead.
+    [] fn evaluate_obligation: EvaluateObligation(
+        CanonicalPredicateGoal<'tcx>
+    ) -> Result<traits::EvaluationResult, traits::OverflowError>,
+
     [] fn substitute_normalize_and_test_predicates:
         substitute_normalize_and_test_predicates_node((DefId, &'tcx Substs<'tcx>)) -> bool,
 
     [] fn target_features_whitelist:
-        target_features_whitelist_node(CrateNum) -> Lrc<FxHashSet<String>>,
+        target_features_whitelist_node(CrateNum) -> Lrc<FxHashMap<String, Option<String>>>,
 
     // Get an estimate of the size of an InstanceDef based on its MIR for CGU partitioning.
     [] fn instance_def_size_estimate: instance_def_size_estimate_dep_node(ty::InstanceDef<'tcx>)
@@ -445,7 +450,11 @@ define_maps! { <'tcx>
 
     [] fn features_query: features_node(CrateNum) -> Lrc<feature_gate::Features>,
 
-    [] fn program_clauses_for: ProgramClausesFor(DefId) -> Lrc<Vec<Clause<'tcx>>>,
+    [] fn program_clauses_for: ProgramClausesFor(DefId) -> Clauses<'tcx>,
+
+    [] fn program_clauses_for_env: ProgramClausesForEnv(
+        ty::ParamEnv<'tcx>
+    ) -> Clauses<'tcx>,
 
     [] fn wasm_custom_sections: WasmCustomSections(CrateNum) -> Lrc<Vec<DefId>>,
     [] fn wasm_import_module_map: WasmImportModuleMap(CrateNum)

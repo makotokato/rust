@@ -20,13 +20,13 @@ use lint::builtin::BuiltinLintDiagnostics;
 use middle::allocator::AllocatorKind;
 use middle::dependency_format;
 use session::search_paths::PathKind;
-use session::config::{DebugInfoLevel, OutputType};
+use session::config::{OutputType};
 use ty::tls;
 use util::nodemap::{FxHashSet};
 use util::common::{duration_to_secs_str, ErrorReported};
 use util::common::ProfileQueriesMsg;
 
-use rustc_data_structures::sync::{Lrc, Lock, LockCell, OneThread, Once};
+use rustc_data_structures::sync::{self, Lrc, Lock, LockCell, OneThread, Once, RwLock};
 
 use syntax::ast::NodeId;
 use errors::{self, DiagnosticBuilder, DiagnosticId};
@@ -41,8 +41,8 @@ use syntax::{ast, codemap};
 use syntax::feature_gate::AttributeType;
 use syntax_pos::{MultiSpan, Span};
 
-use rustc_back::{LinkerFlavor, PanicStrategy};
-use rustc_back::target::{Target, TargetTriple};
+use rustc_target::spec::{LinkerFlavor, PanicStrategy};
+use rustc_target::spec::{Target, TargetTriple};
 use rustc_data_structures::flock;
 use jobserver::Client;
 
@@ -83,13 +83,13 @@ pub struct Session {
 
     // FIXME: lint_store and buffered_lints are not thread-safe,
     // but are only used in a single thread
-    pub lint_store: OneThread<RefCell<lint::LintStore>>,
-    pub buffered_lints: OneThread<RefCell<Option<lint::LintBuffer>>>,
+    pub lint_store: RwLock<lint::LintStore>,
+    pub buffered_lints: Lock<Option<lint::LintBuffer>>,
 
     /// Set of (DiagnosticId, Option<Span>, message) tuples tracking
     /// (sub)diagnostics that have been set once, but should not be set again,
     /// in order to avoid redundantly verbose output (Issue #24690, #44953).
-    pub one_time_diagnostics: RefCell<FxHashSet<(DiagnosticMessageId, Option<Span>, String)>>,
+    pub one_time_diagnostics: Lock<FxHashSet<(DiagnosticMessageId, Option<Span>, String)>>,
     pub plugin_llvm_passes: OneThread<RefCell<Vec<String>>>,
     pub plugin_attributes: OneThread<RefCell<Vec<(String, AttributeType)>>>,
     pub crate_types: Once<Vec<config::CrateType>>,
@@ -112,8 +112,6 @@ pub struct Session {
 
     /// The maximum number of stackframes allowed in const eval
     pub const_eval_stack_frame_limit: usize,
-    /// The maximum number miri steps per constant
-    pub const_eval_step_limit: usize,
 
     /// The metadata::creader module may inject an allocator/panic_runtime
     /// dependency if it didn't already find one, and this tracks what was
@@ -158,7 +156,7 @@ pub struct Session {
 
     /// Loaded up early on in the initialization of this `Session` to avoid
     /// false positives about a job server in our environment.
-    pub jobserver_from_env: Option<Client>,
+    pub jobserver: Client,
 
     /// Metadata about the allocators for the current crate being compiled
     pub has_global_allocator: Once<bool>,
@@ -660,8 +658,11 @@ impl Session {
     }
 
     pub fn must_not_eliminate_frame_pointers(&self) -> bool {
-        self.opts.debuginfo != DebugInfoLevel::NoDebugInfo
-            || !self.target.target.options.eliminate_frame_pointer
+        if let Some(x) = self.opts.cg.force_frame_pointers {
+            x
+        } else {
+            !self.target.target.options.eliminate_frame_pointer
+        }
     }
 
     /// Returns the symbol name for the registrar function,
@@ -931,16 +932,16 @@ impl Session {
     }
 
     pub fn teach(&self, code: &DiagnosticId) -> bool {
-        self.opts.debugging_opts.teach && !self.parse_sess.span_diagnostic.code_emitted(code)
+        self.opts.debugging_opts.teach && self.parse_sess.span_diagnostic.must_teach(code)
     }
 
     /// Are we allowed to use features from the Rust 2018 edition?
     pub fn rust_2018(&self) -> bool {
-        self.opts.debugging_opts.edition >= Edition::Edition2018
+        self.opts.edition >= Edition::Edition2018
     }
 
     pub fn edition(&self) -> Edition {
-        self.opts.debugging_opts.edition
+        self.opts.edition
     }
 }
 
@@ -985,7 +986,7 @@ pub fn build_session_with_codemap(
 
     let external_macro_backtrace = sopts.debugging_opts.external_macro_backtrace;
 
-    let emitter: Box<dyn Emitter> =
+    let emitter: Box<dyn Emitter + sync::Send> =
         match (sopts.error_format, emitter_dest) {
             (config::ErrorOutputType::HumanReadable(color_config), None) => Box::new(
                 EmitterWriter::stderr(
@@ -1004,7 +1005,7 @@ pub fn build_session_with_codemap(
                     Some(registry),
                     codemap.clone(),
                     pretty,
-                    sopts.debugging_opts.approximate_suggestions,
+                    sopts.debugging_opts.suggestion_applicability,
                 ).ui_testing(sopts.debugging_opts.ui_testing),
             ),
             (config::ErrorOutputType::Json(pretty), Some(dst)) => Box::new(
@@ -1013,7 +1014,7 @@ pub fn build_session_with_codemap(
                     Some(registry),
                     codemap.clone(),
                     pretty,
-                    sopts.debugging_opts.approximate_suggestions,
+                    sopts.debugging_opts.suggestion_applicability,
                 ).ui_testing(sopts.debugging_opts.ui_testing),
             ),
             (config::ErrorOutputType::Short(color_config), None) => Box::new(
@@ -1091,9 +1092,9 @@ pub fn build_session_(
         default_sysroot,
         local_crate_source_file,
         working_dir,
-        lint_store: OneThread::new(RefCell::new(lint::LintStore::new())),
-        buffered_lints: OneThread::new(RefCell::new(Some(lint::LintBuffer::new()))),
-        one_time_diagnostics: RefCell::new(FxHashSet()),
+        lint_store: RwLock::new(lint::LintStore::new()),
+        buffered_lints: Lock::new(Some(lint::LintBuffer::new())),
+        one_time_diagnostics: Lock::new(FxHashSet()),
         plugin_llvm_passes: OneThread::new(RefCell::new(Vec::new())),
         plugin_attributes: OneThread::new(RefCell::new(Vec::new())),
         crate_types: Once::new(),
@@ -1103,7 +1104,6 @@ pub fn build_session_(
         recursion_limit: Once::new(),
         type_length_limit: Once::new(),
         const_eval_stack_frame_limit: 100,
-        const_eval_step_limit: 1_000_000,
         next_node_id: OneThread::new(Cell::new(NodeId::new(1))),
         injected_allocator: Once::new(),
         allocator_kind: Once::new(),
@@ -1131,14 +1131,23 @@ pub fn build_session_(
         // positives, or in other words we try to execute this before we open
         // any file descriptors ourselves.
         //
+        // Pick a "reasonable maximum" if we don't otherwise have
+        // a jobserver in our environment, capping out at 32 so we
+        // don't take everything down by hogging the process run queue.
+        // The fixed number is used to have deterministic compilation
+        // across machines.
+        //
         // Also note that we stick this in a global because there could be
         // multiple `Session` instances in this process, and the jobserver is
         // per-process.
-        jobserver_from_env: unsafe {
-            static mut GLOBAL_JOBSERVER: *mut Option<Client> = 0 as *mut _;
+        jobserver: unsafe {
+            static mut GLOBAL_JOBSERVER: *mut Client = 0 as *mut _;
             static INIT: std::sync::Once = std::sync::ONCE_INIT;
             INIT.call_once(|| {
-                GLOBAL_JOBSERVER = Box::into_raw(Box::new(Client::from_env()));
+                let client = Client::from_env().unwrap_or_else(|| {
+                    Client::new(32).expect("failed to create jobserver")
+                });
+                GLOBAL_JOBSERVER = Box::into_raw(Box::new(client));
             });
             (*GLOBAL_JOBSERVER).clone()
         },
@@ -1191,7 +1200,7 @@ pub enum IncrCompSession {
 }
 
 pub fn early_error(output: config::ErrorOutputType, msg: &str) -> ! {
-    let emitter: Box<dyn Emitter> = match output {
+    let emitter: Box<dyn Emitter + sync::Send> = match output {
         config::ErrorOutputType::HumanReadable(color_config) => {
             Box::new(EmitterWriter::stderr(color_config, None, false, false))
         }
@@ -1206,7 +1215,7 @@ pub fn early_error(output: config::ErrorOutputType, msg: &str) -> ! {
 }
 
 pub fn early_warn(output: config::ErrorOutputType, msg: &str) {
-    let emitter: Box<dyn Emitter> = match output {
+    let emitter: Box<dyn Emitter + sync::Send> = match output {
         config::ErrorOutputType::HumanReadable(color_config) => {
             Box::new(EmitterWriter::stderr(color_config, None, false, false))
         }

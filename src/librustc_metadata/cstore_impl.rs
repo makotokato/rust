@@ -51,7 +51,7 @@ macro_rules! provide {
         pub fn provide_extern<$lt>(providers: &mut Providers<$lt>) {
             $(fn $name<'a, $lt:$lt, T>($tcx: TyCtxt<'a, $lt, $lt>, def_id_arg: T)
                                     -> <ty::queries::$name<$lt> as
-                                        QueryConfig>::Value
+                                        QueryConfig<$lt>>::Value
                 where T: IntoArgs,
             {
                 #[allow(unused_variables)]
@@ -142,7 +142,6 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     mir_const_qualif => {
         (cdata.mir_const_qualif(def_id.index), Lrc::new(IdxSetBuf::new_empty(0)))
     }
-    typeck_tables_of => { cdata.item_body_tables(def_id.index, tcx) }
     fn_sig => { cdata.fn_sig(def_id.index, tcx) }
     inherent_impls => { Lrc::new(cdata.get_inherent_implementations_for_type(def_id.index)) }
     is_const_fn => { cdata.is_const_fn(def_id.index) }
@@ -161,9 +160,9 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     // This is only used by rustdoc anyway, which shouldn't have
     // incremental recompilation ever enabled.
     fn_arg_names => { cdata.get_fn_arg_names(def_id.index) }
+    rendered_const => { cdata.get_rendered_const(def_id.index) }
     impl_parent => { cdata.get_parent_impl(def_id.index) }
     trait_of_item => { cdata.get_trait_of_item(def_id.index) }
-    item_body_nested_bodies => { cdata.item_body_nested_bodies(tcx, def_id.index) }
     const_is_rvalue_promotable_to_static => {
         cdata.const_is_rvalue_promotable_to_static(def_id.index)
     }
@@ -242,11 +241,6 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     }
     defined_lang_items => { Lrc::new(cdata.get_lang_items()) }
     missing_lang_items => { Lrc::new(cdata.get_missing_lang_items()) }
-
-    extern_const_body => {
-        debug!("item_body({:?}): inlining item", def_id);
-        cdata.extern_const_body(tcx, def_id.index)
-    }
 
     missing_extern_crate_item => {
         let r = match *cdata.extern_crate.borrow() {
@@ -541,7 +535,7 @@ impl CrateStore for cstore::CStore {
             .insert(local_span, (name.to_string(), data.get_span(id.index, sess)));
 
         LoadedMacro::MacroDef(ast::Item {
-            ident: ast::Ident::from_str(&name),
+            ident: ast::Ident::from_str(&name.as_str()),
             id: ast::DUMMY_NODE_ID,
             span: local_span,
             attrs: attrs.iter().cloned().collect(),

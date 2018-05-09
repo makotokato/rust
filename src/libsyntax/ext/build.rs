@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use abi::Abi;
+use rustc_target::spec::abi::Abi;
 use ast::{self, Ident, Generics, Expr, BlockCheckMode, UnOp, PatKind};
 use attr;
 use syntax_pos::{Pos, Span, DUMMY_SP};
@@ -139,6 +139,7 @@ pub trait AstBuilder {
     fn expr_usize(&self, span: Span, i: usize) -> P<ast::Expr>;
     fn expr_isize(&self, sp: Span, i: isize) -> P<ast::Expr>;
     fn expr_u8(&self, sp: Span, u: u8) -> P<ast::Expr>;
+    fn expr_u16(&self, sp: Span, u: u16) -> P<ast::Expr>;
     fn expr_u32(&self, sp: Span, u: u32) -> P<ast::Expr>;
     fn expr_bool(&self, sp: Span, value: bool) -> P<ast::Expr>;
 
@@ -707,6 +708,10 @@ impl<'a> AstBuilder for ExtCtxt<'a> {
     fn expr_u32(&self, sp: Span, u: u32) -> P<ast::Expr> {
         self.expr_lit(sp, ast::LitKind::Int(u as u128,
                                             ast::LitIntType::Unsigned(ast::UintTy::U32)))
+    }
+    fn expr_u16(&self, sp: Span, u: u16) -> P<ast::Expr> {
+        self.expr_lit(sp, ast::LitKind::Int(u as u128,
+                                            ast::LitIntType::Unsigned(ast::UintTy::U16)))
     }
     fn expr_u8(&self, sp: Span, u: u8) -> P<ast::Expr> {
         self.expr_lit(sp, ast::LitKind::Int(u as u128, ast::LitIntType::Unsigned(ast::UintTy::U8)))

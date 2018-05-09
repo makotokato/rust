@@ -30,10 +30,9 @@ use core::slice;
 use core::hash::{Hash, Hasher};
 use core::cmp;
 
+use alloc::CollectionAllocErr;
 use raw_vec::RawVec;
-
-use super::allocator::CollectionAllocErr;
-use super::vec::Vec;
+use vec::Vec;
 
 const INITIAL_CAPACITY: usize = 7; // 2^3 - 1
 const MINIMUM_CAPACITY: usize = 1; // 2 - 1
@@ -2251,7 +2250,7 @@ unsafe impl<'a, T: Send> Send for Drain<'a, T> {}
 #[stable(feature = "drain", since = "1.6.0")]
 impl<'a, T: 'a> Drop for Drain<'a, T> {
     fn drop(&mut self) {
-        for _ in self.by_ref() {}
+        self.for_each(drop);
 
         let source_deque = unsafe { self.deque.as_mut() };
 

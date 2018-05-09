@@ -271,8 +271,16 @@ pub fn char_lit(lit: &str, diag: Option<(Span, &Handler)>) -> (char, isize) {
         'u' => {
             assert_eq!(lit.as_bytes()[2], b'{');
             let idx = lit.find('}').unwrap();
-            let s = &lit[3..idx].chars().filter(|&c| c != '_').collect::<String>();
-            let v = u32::from_str_radix(&s, 16).unwrap();
+
+            // All digits and '_' are ascii, so treat each byte as a char.
+            let mut v: u32 = 0;
+            for c in lit[3..idx].bytes() {
+                let c = char::from(c);
+                if c != '_' {
+                    let x = c.to_digit(16).unwrap();
+                    v = v.checked_mul(16).unwrap().checked_add(x).unwrap();
+                }
+            }
             let c = char::from_u32(v).unwrap_or_else(|| {
                 if let Some((span, diag)) = diag {
                     let mut diag = diag.struct_span_err(span, "invalid unicode character escape");
@@ -290,14 +298,10 @@ pub fn char_lit(lit: &str, diag: Option<(Span, &Handler)>) -> (char, isize) {
     }
 }
 
-pub fn escape_default(s: &str) -> String {
-    s.chars().map(char::escape_default).flat_map(|x| x).collect()
-}
-
 /// Parse a string representing a string literal into its final form. Does
 /// unescaping.
 pub fn str_lit(lit: &str, diag: Option<(Span, &Handler)>) -> String {
-    debug!("parse_str_lit: given {}", escape_default(lit));
+    debug!("str_lit: given {}", lit.escape_default());
     let mut res = String::with_capacity(lit.len());
 
     let error = |i| format!("lexer should have rejected {} at {}", lit, i);
@@ -366,7 +370,7 @@ pub fn str_lit(lit: &str, diag: Option<(Span, &Handler)>) -> String {
 /// Parse a string representing a raw string literal into its final form. The
 /// only operation this does is convert embedded CRLF into a single LF.
 pub fn raw_str_lit(lit: &str) -> String {
-    debug!("raw_str_lit: given {}", escape_default(lit));
+    debug!("raw_str_lit: given {}", lit.escape_default());
     let mut res = String::with_capacity(lit.len());
 
     let mut chars = lit.chars().peekable();
@@ -670,7 +674,7 @@ mod tests {
     use syntax_pos::{self, Span, BytePos, Pos, NO_EXPANSION};
     use codemap::{respan, Spanned};
     use ast::{self, Ident, PatKind};
-    use abi::Abi;
+    use rustc_target::spec::abi::Abi;
     use attr::first_attr_value_str_by_name;
     use parse;
     use parse::parser::Parser;

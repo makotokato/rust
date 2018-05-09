@@ -990,9 +990,7 @@ macro_rules! atomic_int {
         #[$stable_debug]
         impl fmt::Debug for $atomic_type {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.debug_tuple(stringify!($atomic_type))
-                 .field(&self.load(Ordering::SeqCst))
-                 .finish()
+                fmt::Debug::fmt(&self.load(Ordering::SeqCst), f)
             }
         }
 
@@ -1360,8 +1358,7 @@ Returns the previous value.
 # Examples
 
 ```
-", $extra_feature, "#![feature(atomic_nand)]
-
+", $extra_feature, "
 use std::sync::atomic::{", stringify!($atomic_type), ", Ordering};
 
 let foo = ", stringify!($atomic_type), "::new(0x13);
@@ -1425,8 +1422,8 @@ assert_eq!(foo.load(Ordering::SeqCst), 0b011110);
 
             doc_comment! {
                 concat!("Fetches the value, and applies a function to it that returns an optional
-new value. Returns a `Result` (`Ok(_)` if the function returned `Some(_)`, else `Err(_)`) of the
-previous value.
+new value. Returns a `Result` of `Ok(previous_value)` if the function returned `Some(_)`, else
+`Err(previous_value)`.
 
 Note: This may call the function multiple times if the value has been changed from other threads in
 the meantime, as long as the function returns `Some(_)`, but the function will have been applied
@@ -1555,7 +1552,7 @@ atomic_int! {
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
-    unstable(feature = "atomic_nand", issue = "13226"),
+    unstable(feature = "integer_atomics", issue = "32976"),
     "i8", "../../../std/primitive.i8.html",
     "#![feature(integer_atomics)]\n\n",
     atomic_min, atomic_max,
@@ -1568,7 +1565,7 @@ atomic_int! {
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
-    unstable(feature = "atomic_nand", issue = "13226"),
+    unstable(feature = "integer_atomics", issue = "32976"),
     "u8", "../../../std/primitive.u8.html",
     "#![feature(integer_atomics)]\n\n",
     atomic_umin, atomic_umax,
@@ -1581,7 +1578,7 @@ atomic_int! {
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
-    unstable(feature = "atomic_nand", issue = "13226"),
+    unstable(feature = "integer_atomics", issue = "32976"),
     "i16", "../../../std/primitive.i16.html",
     "#![feature(integer_atomics)]\n\n",
     atomic_min, atomic_max,
@@ -1594,7 +1591,7 @@ atomic_int! {
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
-    unstable(feature = "atomic_nand", issue = "13226"),
+    unstable(feature = "integer_atomics", issue = "32976"),
     "u16", "../../../std/primitive.u16.html",
     "#![feature(integer_atomics)]\n\n",
     atomic_umin, atomic_umax,
@@ -1607,7 +1604,7 @@ atomic_int! {
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
-    unstable(feature = "atomic_nand", issue = "13226"),
+    unstable(feature = "integer_atomics", issue = "32976"),
     "i32", "../../../std/primitive.i32.html",
     "#![feature(integer_atomics)]\n\n",
     atomic_min, atomic_max,
@@ -1620,7 +1617,7 @@ atomic_int! {
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
-    unstable(feature = "atomic_nand", issue = "13226"),
+    unstable(feature = "integer_atomics", issue = "32976"),
     "u32", "../../../std/primitive.u32.html",
     "#![feature(integer_atomics)]\n\n",
     atomic_umin, atomic_umax,
@@ -1633,7 +1630,7 @@ atomic_int! {
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
-    unstable(feature = "atomic_nand", issue = "13226"),
+    unstable(feature = "integer_atomics", issue = "32976"),
     "i64", "../../../std/primitive.i64.html",
     "#![feature(integer_atomics)]\n\n",
     atomic_min, atomic_max,
@@ -1646,7 +1643,7 @@ atomic_int! {
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
     unstable(feature = "integer_atomics", issue = "32976"),
-    unstable(feature = "atomic_nand", issue = "13226"),
+    unstable(feature = "integer_atomics", issue = "32976"),
     "u64", "../../../std/primitive.u64.html",
     "#![feature(integer_atomics)]\n\n",
     atomic_umin, atomic_umax,
@@ -1659,7 +1656,7 @@ atomic_int!{
     stable(feature = "atomic_debug", since = "1.3.0"),
     stable(feature = "atomic_access", since = "1.15.0"),
     stable(feature = "atomic_from", since = "1.23.0"),
-    unstable(feature = "atomic_nand", issue = "13226"),
+    stable(feature = "atomic_nand", since = "1.27.0"),
     "isize", "../../../std/primitive.isize.html",
     "",
     atomic_min, atomic_max,
@@ -1672,7 +1669,7 @@ atomic_int!{
     stable(feature = "atomic_debug", since = "1.3.0"),
     stable(feature = "atomic_access", since = "1.15.0"),
     stable(feature = "atomic_from", since = "1.23.0"),
-    unstable(feature = "atomic_nand", issue = "13226"),
+    stable(feature = "atomic_nand", since = "1.27.0"),
     "usize", "../../../std/primitive.usize.html",
     "",
     atomic_umin, atomic_umax,
@@ -2091,7 +2088,7 @@ pub fn compiler_fence(order: Ordering) {
 #[stable(feature = "atomic_debug", since = "1.3.0")]
 impl fmt::Debug for AtomicBool {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("AtomicBool").field(&self.load(Ordering::SeqCst)).finish()
+        fmt::Debug::fmt(&self.load(Ordering::SeqCst), f)
     }
 }
 
@@ -2099,7 +2096,7 @@ impl fmt::Debug for AtomicBool {
 #[stable(feature = "atomic_debug", since = "1.3.0")]
 impl<T> fmt::Debug for AtomicPtr<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("AtomicPtr").field(&self.load(Ordering::SeqCst)).finish()
+        fmt::Debug::fmt(&self.load(Ordering::SeqCst), f)
     }
 }
 

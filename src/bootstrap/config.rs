@@ -72,6 +72,7 @@ pub struct Config {
     pub dry_run: bool,
 
     pub deny_warnings: bool,
+    pub backtrace_on_ice: bool,
 
     // llvm codegen options
     pub llvm_enabled: bool,
@@ -94,6 +95,7 @@ pub struct Config {
     pub rust_debuginfo: bool,
     pub rust_debuginfo_lines: bool,
     pub rust_debuginfo_only_std: bool,
+    pub rust_debuginfo_tools: bool,
     pub rust_rpath: bool,
     pub rustc_parallel_queries: bool,
     pub rustc_default_linker: Option<String>,
@@ -282,6 +284,7 @@ struct Rust {
     debuginfo: Option<bool>,
     debuginfo_lines: Option<bool>,
     debuginfo_only_std: Option<bool>,
+    debuginfo_tools: Option<bool>,
     experimental_parallel_queries: Option<bool>,
     debug_jemalloc: Option<bool>,
     use_jemalloc: Option<bool>,
@@ -304,6 +307,7 @@ struct Rust {
     wasm_syscall: Option<bool>,
     lld: Option<bool>,
     deny_warnings: Option<bool>,
+    backtrace_on_ice: Option<bool>,
 }
 
 /// TOML representation of how each build target is configured.
@@ -323,6 +327,14 @@ struct TomlTarget {
 }
 
 impl Config {
+    fn path_from_python(var_key: &str) -> PathBuf {
+        match env::var_os(var_key) {
+            // Do not trust paths from Python and normalize them slightly (#49785).
+            Some(var_val) => Path::new(&var_val).components().collect(),
+            _ => panic!("expected '{}' to be set", var_key),
+        }
+    }
+
     pub fn default_opts() -> Config {
         let mut config = Config::default();
         config.llvm_enabled = true;
@@ -346,9 +358,9 @@ impl Config {
         config.deny_warnings = true;
 
         // set by bootstrap.py
-        config.src = env::var_os("SRC").map(PathBuf::from).expect("'SRC' to be set");
         config.build = INTERNER.intern_str(&env::var("BUILD").expect("'BUILD' to be set"));
-        config.out = env::var_os("BUILD_DIR").map(PathBuf::from).expect("'BUILD_DIR' set");
+        config.src = Config::path_from_python("SRC");
+        config.out = Config::path_from_python("BUILD_DIR");
 
         let stage0_root = config.out.join(&config.build).join("stage0/bin");
         config.initial_rustc = stage0_root.join(exe("rustc", &config.build));
@@ -462,6 +474,7 @@ impl Config {
         let mut llvm_assertions = None;
         let mut debuginfo_lines = None;
         let mut debuginfo_only_std = None;
+        let mut debuginfo_tools = None;
         let mut debug = None;
         let mut debug_jemalloc = None;
         let mut debuginfo = None;
@@ -499,6 +512,7 @@ impl Config {
             debuginfo = rust.debuginfo;
             debuginfo_lines = rust.debuginfo_lines;
             debuginfo_only_std = rust.debuginfo_only_std;
+            debuginfo_tools = rust.debuginfo_tools;
             optimize = rust.optimize;
             ignore_git = rust.ignore_git;
             debug_jemalloc = rust.debug_jemalloc;
@@ -519,6 +533,7 @@ impl Config {
             config.musl_root = rust.musl_root.clone().map(PathBuf::from);
             config.save_toolstates = rust.save_toolstates.clone().map(PathBuf::from);
             set(&mut config.deny_warnings, rust.deny_warnings.or(flags.warnings));
+            set(&mut config.backtrace_on_ice, rust.backtrace_on_ice);
 
             if let Some(ref backends) = rust.codegen_backends {
                 config.rust_codegen_backends = backends.iter()
@@ -582,6 +597,7 @@ impl Config {
         };
         config.rust_debuginfo_lines = debuginfo_lines.unwrap_or(default);
         config.rust_debuginfo_only_std = debuginfo_only_std.unwrap_or(default);
+        config.rust_debuginfo_tools = debuginfo_tools.unwrap_or(false);
 
         let default = debug == Some(true);
         config.debug_jemalloc = debug_jemalloc.unwrap_or(default);

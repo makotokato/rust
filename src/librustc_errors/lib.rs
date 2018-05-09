@@ -33,12 +33,12 @@ use self::Level::*;
 
 use emitter::{Emitter, EmitterWriter};
 
-use rustc_data_structures::sync::{self, Lrc};
+use rustc_data_structures::sync::{self, Lrc, Lock, LockCell};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::stable_hasher::StableHasher;
 
 use std::borrow::Cow;
-use std::cell::{RefCell, Cell};
+use std::cell::Cell;
 use std::{error, fmt};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
@@ -55,6 +55,14 @@ mod styled_buffer;
 mod lock;
 
 use syntax_pos::{BytePos, Loc, FileLinesResult, FileMap, FileName, MultiSpan, Span, NO_EXPANSION};
+
+#[derive(Copy, Clone, Debug, PartialEq, Hash, RustcEncodable, RustcDecodable)]
+pub enum Applicability {
+    MachineApplicable,
+    HasPlaceholders,
+    MaybeIncorrect,
+    Unspecified
+}
 
 #[derive(Clone, Debug, PartialEq, Hash, RustcEncodable, RustcDecodable)]
 pub struct CodeSuggestion {
@@ -87,7 +95,7 @@ pub struct CodeSuggestion {
     /// Sometimes we may show suggestions with placeholders,
     /// which are useful for users but not useful for
     /// tools like rustfix
-    pub approximate: bool,
+    pub applicability: Applicability,
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, RustcEncodable, RustcDecodable)]
@@ -262,19 +270,22 @@ pub struct Handler {
     pub flags: HandlerFlags,
 
     err_count: AtomicUsize,
-    emitter: RefCell<Box<Emitter>>,
-    continue_after_error: Cell<bool>,
-    delayed_span_bug: RefCell<Option<Diagnostic>>,
+    emitter: Lock<Box<Emitter + sync::Send>>,
+    continue_after_error: LockCell<bool>,
+    delayed_span_bug: Lock<Option<Diagnostic>>,
 
     // This set contains the `DiagnosticId` of all emitted diagnostics to avoid
     // emitting the same diagnostic with extended help (`--teach`) twice, which
     // would be uneccessary repetition.
-    tracked_diagnostic_codes: RefCell<FxHashSet<DiagnosticId>>,
+    taught_diagnostics: Lock<FxHashSet<DiagnosticId>>,
+
+    /// Used to suggest rustc --explain <error code>
+    emitted_diagnostic_codes: Lock<FxHashSet<DiagnosticId>>,
 
     // This set contains a hash of every diagnostic that has been emitted by
     // this handler. These hashes is used to avoid emitting the same error
     // twice.
-    emitted_diagnostics: RefCell<FxHashSet<u128>>,
+    emitted_diagnostics: Lock<FxHashSet<u128>>,
 }
 
 fn default_track_diagnostic(_: &Diagnostic) {}
@@ -315,7 +326,7 @@ impl Handler {
 
     pub fn with_emitter(can_emit_warnings: bool,
                         treat_err_as_bug: bool,
-                        e: Box<Emitter>)
+                        e: Box<Emitter + sync::Send>)
                         -> Handler {
         Handler::with_emitter_and_flags(
             e,
@@ -326,15 +337,16 @@ impl Handler {
             })
     }
 
-    pub fn with_emitter_and_flags(e: Box<Emitter>, flags: HandlerFlags) -> Handler {
+    pub fn with_emitter_and_flags(e: Box<Emitter + sync::Send>, flags: HandlerFlags) -> Handler {
         Handler {
             flags,
             err_count: AtomicUsize::new(0),
-            emitter: RefCell::new(e),
-            continue_after_error: Cell::new(true),
-            delayed_span_bug: RefCell::new(None),
-            tracked_diagnostic_codes: RefCell::new(FxHashSet()),
-            emitted_diagnostics: RefCell::new(FxHashSet()),
+            emitter: Lock::new(e),
+            continue_after_error: LockCell::new(true),
+            delayed_span_bug: Lock::new(None),
+            taught_diagnostics: Lock::new(FxHashSet()),
+            emitted_diagnostic_codes: Lock::new(FxHashSet()),
+            emitted_diagnostics: Lock::new(FxHashSet()),
         }
     }
 
@@ -348,7 +360,7 @@ impl Handler {
     /// tools that want to reuse a `Parser` cleaning the previously emitted diagnostics as well as
     /// the overall count of emitted error diagnostics.
     pub fn reset_err_count(&self) {
-        self.emitted_diagnostics.replace(FxHashSet());
+        *self.emitted_diagnostics.borrow_mut() = FxHashSet();
         self.err_count.store(0, SeqCst);
     }
 
@@ -568,10 +580,10 @@ impl Handler {
         let _ = self.fatal(&s);
 
         let can_show_explain = self.emitter.borrow().should_show_explain();
-        let are_there_diagnostics = !self.tracked_diagnostic_codes.borrow().is_empty();
+        let are_there_diagnostics = !self.emitted_diagnostic_codes.borrow().is_empty();
         if can_show_explain && are_there_diagnostics {
             let mut error_codes =
-                self.tracked_diagnostic_codes.borrow()
+                self.emitted_diagnostic_codes.borrow()
                                              .clone()
                                              .into_iter()
                                              .filter_map(|x| match x {
@@ -630,12 +642,13 @@ impl Handler {
         }
     }
 
-    /// `true` if a diagnostic with this code has already been emitted in this handler.
+    /// `true` if we haven't taught a diagnostic with this code already.
+    /// The caller must then teach the user about such a diagnostic.
     ///
     /// Used to suppress emitting the same error multiple times with extended explanation when
     /// calling `-Zteach`.
-    pub fn code_emitted(&self, code: &DiagnosticId) -> bool {
-        self.tracked_diagnostic_codes.borrow().contains(code)
+    pub fn must_teach(&self, code: &DiagnosticId) -> bool {
+        self.taught_diagnostics.borrow_mut().insert(code.clone())
     }
 
     pub fn force_print_db(&self, mut db: DiagnosticBuilder) {
@@ -651,7 +664,7 @@ impl Handler {
         });
 
         if let Some(ref code) = diagnostic.code {
-            self.tracked_diagnostic_codes.borrow_mut().insert(code.clone());
+            self.emitted_diagnostic_codes.borrow_mut().insert(code.clone());
         }
 
         let diagnostic_hash = {

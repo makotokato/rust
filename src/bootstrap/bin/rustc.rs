@@ -107,6 +107,13 @@ fn main() {
              env::join_paths(&dylib_path).unwrap());
     let mut maybe_crate = None;
 
+    // Print backtrace in case of ICE
+    if env::var("RUSTC_BACKTRACE_ON_ICE").is_ok() && env::var("RUST_BACKTRACE").is_err() {
+        cmd.env("RUST_BACKTRACE", "1");
+    }
+
+    cmd.env("RUSTC_BREAK_ON_ICE", "1");
+
     if let Some(target) = target {
         // The stage0 compiler has a special sysroot distinct from what we
         // actually downloaded, so we just always pass the `--sysroot` option.
@@ -247,9 +254,6 @@ fn main() {
         // When running miri tests, we need to generate MIR for all libraries
         if env::var("TEST_MIRI").ok().map_or(false, |val| val == "true") {
             cmd.arg("-Zalways-encode-mir");
-            if stage != "0" {
-                cmd.arg("-Zmiri");
-            }
             cmd.arg("-Zmir-emit-validate=1");
         }
 

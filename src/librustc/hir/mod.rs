@@ -34,7 +34,7 @@ use mir::mono::Linkage;
 
 use syntax_pos::{Span, DUMMY_SP};
 use syntax::codemap::{self, Spanned};
-use syntax::abi::Abi;
+use rustc_target::spec::abi::Abi;
 use syntax::ast::{self, Name, NodeId, DUMMY_NODE_ID, AsmDialect};
 use syntax::ast::{Attribute, Lit, StrStyle, FloatTy, IntTy, UintTy, MetaItem};
 use syntax::attr::InlineAttr;
@@ -2277,6 +2277,7 @@ bitflags! {
         const NAKED                     = 0b0001_0000;
         const NO_MANGLE                 = 0b0010_0000;
         const RUSTC_STD_INTERNAL_SYMBOL = 0b0100_0000;
+        const NO_DEBUG                  = 0b1000_0000;
     }
 }
 

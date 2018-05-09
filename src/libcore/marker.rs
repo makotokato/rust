@@ -595,13 +595,15 @@ unsafe impl<T: ?Sized> Freeze for *mut T {}
 unsafe impl<'a, T: ?Sized> Freeze for &'a T {}
 unsafe impl<'a, T: ?Sized> Freeze for &'a mut T {}
 
-/// Types which can be moved out of a `Pin`.
+/// Types which can be moved out of a `PinMut`.
 ///
-/// The `Unpin` trait is used to control the behavior of the [`Pin`] type. If a
+/// The `Unpin` trait is used to control the behavior of the [`PinMut`] type. If a
 /// type implements `Unpin`, it is safe to move a value of that type out of the
-/// `Pin` pointer.
+/// `PinMut` pointer.
 ///
 /// This trait is automatically implemented for almost every type.
+///
+/// [`PinMut`]: ../mem/struct.PinMut.html
 #[unstable(feature = "pin", issue = "49150")]
 pub unsafe auto trait Unpin {}
 
@@ -630,7 +632,7 @@ mod copy_impls {
         bool char
     }
 
-    #[stable(feature = "never_type", since = "1.26.0")]
+    #[unstable(feature = "never_type", issue = "35121")]
     impl Copy for ! {}
 
     #[stable(feature = "rust1", since = "1.0.0")]

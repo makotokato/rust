@@ -25,6 +25,7 @@
 #![feature(slice_sort_by_cached_key)]
 #![feature(set_stdio)]
 #![feature(rustc_stack_internals)]
+#![feature(no_debug)]
 
 extern crate arena;
 extern crate getopts;
@@ -34,7 +35,7 @@ extern crate env_logger;
 extern crate libc;
 extern crate rustc;
 extern crate rustc_allocator;
-extern crate rustc_back;
+extern crate rustc_target;
 extern crate rustc_borrowck;
 extern crate rustc_data_structures;
 extern crate rustc_errors as errors;
@@ -230,6 +231,9 @@ fn load_backend_from_dylib(path: &Path) -> fn() -> Box<TransCrate> {
 
 pub fn get_trans(sess: &Session) -> Box<TransCrate> {
     static INIT: Once = ONCE_INIT;
+
+    #[allow(deprecated)]
+    #[no_debug]
     static mut LOAD: fn() -> Box<TransCrate> = || unreachable!();
 
     INIT.call_once(|| {
@@ -546,6 +550,18 @@ fn run_compiler_impl<'a>(args: &[String],
 
     (result, Some(sess))
 }
+
+#[cfg(unix)]
+pub fn set_sigpipe_handler() {
+    unsafe {
+        // Set the SIGPIPE signal handler, so that an EPIPE
+        // will cause rustc to terminate, as expected.
+        assert!(libc::signal(libc::SIGPIPE, libc::SIG_DFL) != libc::SIG_ERR);
+    }
+}
+
+#[cfg(windows)]
+pub fn set_sigpipe_handler() {}
 
 // Extract output directory and file from matches.
 fn make_output(matches: &getopts::Matches) -> (Option<PathBuf>, Option<PathBuf>) {
@@ -1005,7 +1021,7 @@ impl RustcDefaultCalls {
         for req in &sess.opts.prints {
             match *req {
                 TargetList => {
-                    let mut targets = rustc_back::target::get_targets().collect::<Vec<String>>();
+                    let mut targets = rustc_target::spec::get_targets().collect::<Vec<String>>();
                     targets.sort();
                     println!("{}", targets.join("\n"));
                 },
@@ -1044,7 +1060,7 @@ impl RustcDefaultCalls {
                     let mut cfgs = Vec::new();
                     for &(name, ref value) in sess.parse_sess.config.iter() {
                         let gated_cfg = GatedCfg::gate(&ast::MetaItem {
-                            ident: ast::Ident::with_empty_ctxt(name),
+                            ident: ast::Path::from_ident(name.to_ident()),
                             node: ast::MetaItemKind::Word,
                             span: DUMMY_SP,
                         });
@@ -1510,7 +1526,8 @@ pub fn in_rustc_thread<F, R>(f: F) -> Result<R, Box<Any + Send>>
         let thread = cfg.spawn(f);
         thread.unwrap().join()
     } else {
-        Ok(f())
+        let f = panic::AssertUnwindSafe(f);
+        panic::catch_unwind(f)
     }
 }
 

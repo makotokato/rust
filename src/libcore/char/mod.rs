@@ -40,7 +40,7 @@ pub use self::convert::{from_u32, from_digit};
 pub use self::convert::from_u32_unchecked;
 #[stable(feature = "char_from_str", since = "1.20.0")]
 pub use self::convert::ParseCharError;
-#[stable(feature = "try_from", since = "1.26.0")]
+#[unstable(feature = "try_from", issue = "33417")]
 pub use self::convert::CharTryFromError;
 #[stable(feature = "decode_utf16", since = "1.9.0")]
 pub use self::decode::{decode_utf16, DecodeUtf16, DecodeUtf16Error};
@@ -51,6 +51,9 @@ pub use unicode::tables::UNICODE_VERSION;
 #[unstable(feature = "unicode_version", issue = "49726")]
 pub use unicode::version::UnicodeVersion;
 #[unstable(feature = "decode_utf8", issue = "33906")]
+#[rustc_deprecated(since = "1.27.0", reason = "Use str::from_utf8 instead:
+    https://doc.rust-lang.org/nightly/std/str/struct.Utf8Error.html#examples")]
+#[allow(deprecated)]
 pub use self::decode::{decode_utf8, DecodeUtf8, InvalidSequence};
 
 use fmt::{self, Write};
