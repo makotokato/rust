@@ -1,4 +1,4 @@
-// Copyright 2018 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -8,8 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use LinkerFlavor;
-use target::{Target, TargetResult};
+use spec::{LinkerFlavor, Target, TargetResult};
 
 pub fn target() -> TargetResult {
     let mut base = super::windows_msvc_base::opts();
@@ -28,6 +27,9 @@ pub fn target() -> TargetResult {
         target_env: "msvc".to_string(),
         target_vendor: "pc".to_string(),
         linker_flavor: LinkerFlavor::Msvc,
-        options: base,
+        options: TargetOptions {
+        	abi_blacklist: super::arm_base::abi_blacklist(),
+        	.. base
+        },
     })
 }
