@@ -10,6 +10,8 @@
 
 //! Unicode string slices.
 //!
+//! *[See also the `str` primitive type](../../std/primitive.str.html).*
+//!
 //! The `&str` type is one of the two main string types, the other being `String`.
 //! Unlike its `String` counterpart, its contents are borrowed.
 //!
@@ -29,8 +31,6 @@
 //! ```
 //! let hello_world: &'static str = "Hello, world!";
 //! ```
-//!
-//! *[See also the `str` primitive type](../../std/primitive.str.html).*
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
@@ -207,7 +207,8 @@ impl str {
     /// let s = "this is old";
     /// assert_eq!(s, s.replace("cookie monster", "little lamb"));
     /// ```
-    #[must_use]
+    #[must_use = "this returns the replaced string as a new allocation, \
+                  without modifying the original"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn replace<'a, P: Pattern<'a>>(&'a self, from: P, to: &str) -> String {
@@ -247,7 +248,8 @@ impl str {
     /// let s = "this is old";
     /// assert_eq!(s, s.replacen("cookie monster", "little lamb", 10));
     /// ```
-    #[must_use]
+    #[must_use = "this returns the replaced string as a new allocation, \
+                  without modifying the original"]
     #[stable(feature = "str_replacen", since = "1.16.0")]
     pub fn replacen<'a, P: Pattern<'a>>(&'a self, pat: P, to: &str, count: usize) -> String {
         // Hope to reduce the times of re-allocation
