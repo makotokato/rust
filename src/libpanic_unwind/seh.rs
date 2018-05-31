@@ -140,6 +140,27 @@ mod imp {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+#[macro_use]
+mod imp {
+    pub type ptr_t = u32;
+    pub const OFFSET: i32 = 8;
+
+    pub const NAME1: [u8; 7] = [b'.', b'P', b'E', b'A', b'_', b'K', 0];
+    pub const NAME2: [u8; 7] = [b'.', b'P', b'E', b'A', b'X', 0, 0];
+
+    extern "C" {
+        pub static __ImageBase: u8;
+    }
+
+    macro_rules! ptr {
+        (0) => (0);
+        ($e:expr) => {
+            (($e as usize) - (&imp::__ImageBase as *const _ as usize)) as u32
+        }
+    }
+}
+
 #[repr(C)]
 pub struct _ThrowInfo {
     pub attribues: c_uint,
