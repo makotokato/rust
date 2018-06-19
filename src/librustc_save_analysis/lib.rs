@@ -12,8 +12,10 @@
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
 #![feature(custom_attribute)]
-#![feature(macro_lifetime_matcher)]
+#![cfg_attr(stage0, feature(macro_lifetime_matcher))]
 #![allow(unused_attributes)]
+
+#![recursion_limit="256"]
 
 #[macro_use]
 extern crate rustc;
@@ -747,6 +749,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
             HirDef::TraitAlias(def_id) |
             HirDef::AssociatedTy(def_id) |
             HirDef::Trait(def_id) |
+            HirDef::Existential(def_id) |
             HirDef::TyParam(def_id) => {
                 let span = self.span_from_span(sub_span);
                 Some(Ref {

@@ -61,7 +61,6 @@
 
 use rustc::hir;
 use rustc::hir::def_id::DefId;
-use rustc::middle::const_val::ConstVal;
 use rustc::mir::*;
 use rustc::mir::visit::{PlaceContext, Visitor, MutVisitor};
 use rustc::ty::{self, TyCtxt, AdtDef, Ty};
@@ -79,7 +78,6 @@ use transform::simplify;
 use transform::no_landing_pads::no_landing_pads;
 use dataflow::{do_dataflow, DebugFormatted, state_for_location};
 use dataflow::{MaybeStorageLive, HaveBeenBorrowedLocals};
-use rustc::mir::interpret::{Value, PrimVal};
 
 pub struct StateTransform;
 
@@ -180,10 +178,10 @@ impl<'a, 'tcx> TransformVisitor<'a, 'tcx> {
             span: source_info.span,
             ty: self.tcx.types.u32,
             literal: Literal::Value {
-                value: self.tcx.mk_const(ty::Const {
-                    val: ConstVal::Value(Value::ByVal(PrimVal::Bytes(state_disc.into()))),
-                    ty: self.tcx.types.u32
-                }),
+                value: ty::Const::from_bits(
+                    self.tcx,
+                    state_disc.into(),
+                    ty::ParamEnv::empty().and(self.tcx.types.u32)),
             },
         });
         Statement {
@@ -297,12 +295,13 @@ fn make_generator_state_argument_indirect<'a, 'tcx>(
 
 fn replace_result_variable<'tcx>(ret_ty: Ty<'tcx>,
                             mir: &mut Mir<'tcx>) -> Local {
+    let source_info = source_info(mir);
     let new_ret = LocalDecl {
         mutability: Mutability::Mut,
         ty: ret_ty,
         name: None,
-        source_info: source_info(mir),
-        syntactic_scope: ARGUMENT_VISIBILITY_SCOPE,
+        source_info,
+        visibility_scope: source_info.scope,
         internal: false,
         is_user_variable: false,
     };
@@ -643,7 +642,7 @@ fn create_generator_drop_shim<'a, 'tcx>(
         ty: tcx.mk_nil(),
         name: None,
         source_info,
-        syntactic_scope: ARGUMENT_VISIBILITY_SCOPE,
+        visibility_scope: source_info.scope,
         internal: false,
         is_user_variable: false,
     };
@@ -659,7 +658,7 @@ fn create_generator_drop_shim<'a, 'tcx>(
         }),
         name: None,
         source_info,
-        syntactic_scope: ARGUMENT_VISIBILITY_SCOPE,
+        visibility_scope: source_info.scope,
         internal: false,
         is_user_variable: false,
     };
@@ -698,10 +697,7 @@ fn insert_panic_block<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             span: mir.span,
             ty: tcx.types.bool,
             literal: Literal::Value {
-                value: tcx.mk_const(ty::Const {
-                    val: ConstVal::Value(Value::ByVal(PrimVal::Bytes(0))),
-                    ty: tcx.types.bool
-                }),
+                value: ty::Const::from_bool(tcx, false),
             },
         }),
         expected: true,
@@ -767,7 +763,7 @@ fn create_generator_resume_function<'a, 'tcx>(
 fn source_info<'a, 'tcx>(mir: &Mir<'tcx>) -> SourceInfo {
     SourceInfo {
         span: mir.span,
-        scope: ARGUMENT_VISIBILITY_SCOPE,
+        scope: OUTERMOST_SOURCE_SCOPE,
     }
 }
 
@@ -866,8 +862,10 @@ impl MirPass for StateTransform {
         // Compute GeneratorState<yield_ty, return_ty>
         let state_did = tcx.lang_items().gen_state().unwrap();
         let state_adt_ref = tcx.adt_def(state_did);
-        let state_substs = tcx.mk_substs([yield_ty.into(),
-            mir.return_ty().into()].iter());
+        let state_substs = tcx.intern_substs(&[
+            yield_ty.into(),
+            mir.return_ty().into(),
+        ]);
         let ret_ty = tcx.mk_adt(state_adt_ref, state_substs);
 
         // We rename RETURN_PLACE which has type mir.return_ty to new_ret_local

@@ -13,7 +13,7 @@ use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
 use rustc_data_structures::small_vec::SmallVec;
-use rustc_data_structures::sync::{Lrc, RwLock, ReadGuard, Lock};
+use rustc_data_structures::sync::{Lrc, Lock};
 use std::env;
 use std::hash::Hash;
 use ty::{self, TyCtxt};
@@ -80,9 +80,6 @@ struct DepGraphData {
     /// this map. We can later look for and extract that data.
     previous_work_products: FxHashMap<WorkProductId, WorkProduct>,
 
-    /// Work-products that we generate in this run.
-    work_products: RwLock<FxHashMap<WorkProductId, WorkProduct>>,
-
     dep_node_debug: Lock<FxHashMap<DepNode, String>>,
 
     // Used for testing, only populated when -Zquery-dep-graph is specified.
@@ -103,7 +100,6 @@ impl DepGraph {
         DepGraph {
             data: Some(Lrc::new(DepGraphData {
                 previous_work_products: prev_work_products,
-                work_products: RwLock::new(FxHashMap()),
                 dep_node_debug: Lock::new(FxHashMap()),
                 current: Lock::new(CurrentDepGraph::new()),
                 previous: prev_graph,
@@ -462,19 +458,6 @@ impl DepGraph {
         self.data.as_ref().unwrap().previous.node_to_index(dep_node)
     }
 
-    /// Indicates that we created the given work-product in this run
-    /// for `v`. This record will be preserved and loaded in the next
-    /// run.
-    pub fn insert_work_product(&self, v: &WorkProductId, data: WorkProduct) {
-        debug!("insert_work_product({:?}, {:?})", v, data);
-        self.data
-            .as_ref()
-            .unwrap()
-            .work_products
-            .borrow_mut()
-            .insert(v.clone(), data);
-    }
-
     /// Check whether a previous work product exists for `v` and, if
     /// so, return the path that leads to it. Used to skip doing work.
     pub fn previous_work_product(&self, v: &WorkProductId) -> Option<WorkProduct> {
@@ -483,12 +466,6 @@ impl DepGraph {
             .and_then(|data| {
                 data.previous_work_products.get(v).cloned()
             })
-    }
-
-    /// Access the map of work-products created during this run. Only
-    /// used during saving of the dep-graph.
-    pub fn work_products(&self) -> ReadGuard<FxHashMap<WorkProductId, WorkProduct>> {
-        self.data.as_ref().unwrap().work_products.borrow()
     }
 
     /// Access the map of work-products created during the cached run. Only
@@ -679,7 +656,7 @@ impl DepGraph {
                     // We failed to mark it green, so we try to force the query.
                     debug!("try_mark_green({:?}) --- trying to force \
                             dependency {:?}", dep_node, dep_dep_node);
-                    if ::ty::maps::force_from_dep_node(tcx, dep_dep_node) {
+                    if ::ty::query::force_from_dep_node(tcx, dep_dep_node) {
                         let dep_dep_node_color = data.colors.borrow().get(dep_dep_node_index);
 
                         match dep_dep_node_color {
@@ -765,14 +742,14 @@ impl DepGraph {
             // and emit other diagnostics before these diagnostics are emitted.
             // Such diagnostics should be emitted after these.
             // See https://github.com/rust-lang/rust/issues/48685
-            let diagnostics = tcx.on_disk_query_result_cache
+            let diagnostics = tcx.queries.on_disk_cache
                                  .load_diagnostics(tcx, prev_dep_node_index);
 
             if diagnostics.len() > 0 {
                 let handle = tcx.sess.diagnostic();
 
                 // Promote the previous diagnostics to the current session.
-                tcx.on_disk_query_result_cache
+                tcx.queries.on_disk_cache
                    .store_diagnostics(dep_node_index, diagnostics.clone());
 
                 for diagnostic in diagnostics {
@@ -879,10 +856,10 @@ impl DepGraph {
 /// each partition. In the first run, we create partitions based on
 /// the symbols that need to be compiled. For each partition P, we
 /// hash the symbols in P and create a `WorkProduct` record associated
-/// with `DepNode::TransPartition(P)`; the hash is the set of symbols
+/// with `DepNode::CodegenUnit(P)`; the hash is the set of symbols
 /// in P.
 ///
-/// The next time we compile, if the `DepNode::TransPartition(P)` is
+/// The next time we compile, if the `DepNode::CodegenUnit(P)` is
 /// judged to be clean (which means none of the things we read to
 /// generate the partition were found to be dirty), it will be loaded
 /// into previous work products. We will then regenerate the set of

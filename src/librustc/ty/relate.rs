@@ -18,13 +18,12 @@ use middle::const_val::ConstVal;
 use ty::subst::{Kind, UnpackedKind, Substs};
 use ty::{self, Ty, TyCtxt, TypeFoldable};
 use ty::error::{ExpectedFound, TypeError};
-use mir::interpret::{GlobalId, Value, PrimVal};
+use mir::interpret::GlobalId;
 use util::common::ErrorReported;
 use std::rc::Rc;
 use std::iter;
 use rustc_target::spec::abi;
 use hir as ast;
-use rustc_data_structures::accumulate_vec::AccumulateVec;
 
 pub type RelateResult<'tcx, T> = Result<T, TypeError<'tcx>>;
 
@@ -154,6 +153,8 @@ impl<'tcx> Relate<'tcx> for ty::FnSig<'tcx> {
                            -> RelateResult<'tcx, ty::FnSig<'tcx>>
         where R: TypeRelation<'a, 'gcx, 'tcx>, 'gcx: 'a+'tcx, 'tcx: 'a
     {
+        let tcx = relation.tcx();
+
         if a.variadic != b.variadic {
             return Err(TypeError::VariadicMismatch(
                 expected_found(relation, &a.variadic, &b.variadic)));
@@ -175,9 +176,9 @@ impl<'tcx> Relate<'tcx> for ty::FnSig<'tcx> {
                 } else {
                     relation.relate_with_variance(ty::Contravariant, &a, &b)
                 }
-            }).collect::<Result<AccumulateVec<[_; 8]>, _>>()?;
+            });
         Ok(ty::FnSig {
-            inputs_and_output: relation.tcx().intern_type_list(&inputs_and_output),
+            inputs_and_output: tcx.mk_type_list(inputs_and_output)?,
             variadic: a.variadic,
             unsafety,
             abi,
@@ -469,8 +470,10 @@ pub fn super_relate_tys<'a, 'gcx, 'tcx, R>(relation: &mut R,
             assert_eq!(sz_a.ty, tcx.types.usize);
             assert_eq!(sz_b.ty, tcx.types.usize);
             let to_u64 = |x: &'tcx ty::Const<'tcx>| -> Result<u64, ErrorReported> {
+                if let Some(s) = x.assert_usize(tcx) {
+                    return Ok(s);
+                }
                 match x.val {
-                    ConstVal::Value(Value::ByVal(prim)) => Ok(prim.to_u64().unwrap()),
                     ConstVal::Unevaluated(def_id, substs) => {
                         // FIXME(eddyb) get the right param_env.
                         let param_env = ty::ParamEnv::empty();
@@ -487,15 +490,10 @@ pub fn super_relate_tys<'a, 'gcx, 'tcx, R>(relation: &mut R,
                                         instance,
                                         promoted: None
                                     };
-                                    match tcx.const_eval(param_env.and(cid)) {
-                                        Ok(&ty::Const {
-                                            val: ConstVal::Value(Value::ByVal(PrimVal::Bytes(b))),
-                                            ..
-                                        }) => {
-                                            assert_eq!(b as u64 as u128, b);
-                                            return Ok(b as u64);
-                                        }
-                                        _ => {}
+                                    if let Some(s) = tcx.const_eval(param_env.and(cid))
+                                                        .ok()
+                                                        .map(|c| c.unwrap_usize(tcx)) {
+                                        return Ok(s)
                                     }
                                 }
                             },

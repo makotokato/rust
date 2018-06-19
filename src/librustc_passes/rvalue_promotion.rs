@@ -32,12 +32,13 @@ use rustc::middle::expr_use_visitor as euv;
 use rustc::middle::mem_categorization as mc;
 use rustc::middle::mem_categorization::Categorization;
 use rustc::ty::{self, Ty, TyCtxt};
-use rustc::ty::maps::Providers;
+use rustc::ty::query::Providers;
 use rustc::ty::subst::Substs;
 use rustc::util::nodemap::{ItemLocalSet, NodeSet};
 use rustc::hir;
 use rustc_data_structures::sync::Lrc;
 use syntax::ast;
+use syntax::attr;
 use syntax_pos::{Span, DUMMY_SP};
 use rustc::hir::intravisit::{self, Visitor, NestedVisitorMap};
 
@@ -119,7 +120,7 @@ impl<'a, 'gcx> CheckCrateVisitor<'a, 'gcx> {
         !ty.needs_drop(self.tcx, self.param_env)
     }
 
-    fn handle_const_fn_call(&mut self, def_id: DefId, ret_ty: Ty<'gcx>) {
+    fn handle_const_fn_call(&mut self, def_id: DefId, ret_ty: Ty<'gcx>, span: Span) {
         self.promotable &= self.type_has_only_promotable_values(ret_ty);
 
         self.promotable &= if let Some(fn_id) = self.tcx.hir.as_local_node_id(def_id) {
@@ -129,6 +130,42 @@ impl<'a, 'gcx> CheckCrateVisitor<'a, 'gcx> {
         } else {
             self.tcx.is_const_fn(def_id)
         };
+
+        if let Some(&attr::Stability {
+            rustc_const_unstable: Some(attr::RustcConstUnstable {
+                feature: ref feature_name
+            }),
+        .. }) = self.tcx.lookup_stability(def_id) {
+            self.promotable &=
+                // feature-gate is enabled,
+                self.tcx.features()
+                    .declared_lib_features
+                    .iter()
+                    .any(|&(ref sym, _)| sym == feature_name) ||
+
+                // this comes from a crate with the feature-gate enabled,
+                !def_id.is_local() ||
+
+                // this comes from a macro that has #[allow_internal_unstable]
+                span.allows_unstable();
+        }
+    }
+
+    /// While the `ExprUseVisitor` walks, we will identify which
+    /// expressions are borrowed, and insert their ids into this
+    /// table. Actually, we insert the "borrow-id", which is normally
+    /// the id of the expession being borrowed: but in the case of
+    /// `ref mut` borrows, the `id` of the pattern is
+    /// inserted. Therefore later we remove that entry from the table
+    /// and transfer it over to the value being matched. This will
+    /// then prevent said value from being promoted.
+    fn remove_mut_rvalue_borrow(&mut self, pat: &hir::Pat) -> bool {
+        let mut any_removed = false;
+        pat.walk(|p| {
+            any_removed |= self.mut_rvalue_borrows.remove(&p.id);
+            true
+        });
+        any_removed
     }
 }
 
@@ -180,9 +217,15 @@ impl<'a, 'tcx> Visitor<'tcx> for CheckCrateVisitor<'a, 'tcx> {
     fn visit_stmt(&mut self, stmt: &'tcx hir::Stmt) {
         match stmt.node {
             hir::StmtDecl(ref decl, _) => {
-                match decl.node {
-                    hir::DeclLocal(_) => {
+                match &decl.node {
+                    hir::DeclLocal(local) => {
                         self.promotable = false;
+
+                        if self.remove_mut_rvalue_borrow(&local.pat) {
+                            if let Some(init) = &local.init {
+                                self.mut_rvalue_borrows.insert(init.id);
+                            }
+                        }
                     }
                     // Item statements are allowed
                     hir::DeclItem(_) => {}
@@ -209,9 +252,7 @@ impl<'a, 'tcx> Visitor<'tcx> for CheckCrateVisitor<'a, 'tcx> {
             // patterns and set that on the discriminator.
             let mut mut_borrow = false;
             for pat in arms.iter().flat_map(|arm| &arm.pats) {
-                if self.mut_rvalue_borrows.remove(&pat.id) {
-                    mut_borrow = true;
-                }
+                mut_borrow = self.remove_mut_rvalue_borrow(pat);
             }
             if mut_borrow {
                 self.mut_rvalue_borrows.insert(discr.id);
@@ -275,7 +316,7 @@ fn check_expr<'a, 'tcx>(v: &mut CheckCrateVisitor<'a, 'tcx>, e: &hir::Expr, node
         hir::ExprCast(ref from, _) => {
             debug!("Checking const cast(id={})", from.id);
             match v.tables.cast_kinds().get(from.hir_id) {
-                None => span_bug!(e.span, "no kind for cast"),
+                None => v.tcx.sess.delay_span_bug(e.span, "no kind for cast"),
                 Some(&CastKind::PtrAddrCast) | Some(&CastKind::FnPtrAddrCast) => {
                     v.promotable = false;
                 }
@@ -342,7 +383,7 @@ fn check_expr<'a, 'tcx>(v: &mut CheckCrateVisitor<'a, 'tcx>, e: &hir::Expr, node
             let mut callee = &**callee;
             loop {
                 callee = match callee.node {
-                    hir::ExprBlock(ref block) => match block.expr {
+                    hir::ExprBlock(ref block, _) => match block.expr {
                         Some(ref tail) => &tail,
                         None => break
                     },
@@ -359,12 +400,12 @@ fn check_expr<'a, 'tcx>(v: &mut CheckCrateVisitor<'a, 'tcx>, e: &hir::Expr, node
                 Def::StructCtor(_, CtorKind::Fn) |
                 Def::VariantCtor(_, CtorKind::Fn) => {}
                 Def::Fn(did) => {
-                    v.handle_const_fn_call(did, node_ty)
+                    v.handle_const_fn_call(did, node_ty, e.span)
                 }
                 Def::Method(did) => {
                     match v.tcx.associated_item(did).container {
                         ty::ImplContainer(_) => {
-                            v.handle_const_fn_call(did, node_ty)
+                            v.handle_const_fn_call(did, node_ty, e.span)
                         }
                         ty::TraitContainer(_) => v.promotable = false
                     }
@@ -376,7 +417,7 @@ fn check_expr<'a, 'tcx>(v: &mut CheckCrateVisitor<'a, 'tcx>, e: &hir::Expr, node
             if let Some(def) = v.tables.type_dependent_defs().get(e.hir_id) {
                 let def_id = def.def_id();
                 match v.tcx.associated_item(def_id).container {
-                    ty::ImplContainer(_) => v.handle_const_fn_call(def_id, node_ty),
+                    ty::ImplContainer(_) => v.handle_const_fn_call(def_id, node_ty, e.span),
                     ty::TraitContainer(_) => v.promotable = false
                 }
             } else {
@@ -404,9 +445,16 @@ fn check_expr<'a, 'tcx>(v: &mut CheckCrateVisitor<'a, 'tcx>, e: &hir::Expr, node
             }
         }
 
-        hir::ExprBlock(_) |
+        hir::ExprField(ref expr, _) => {
+            if let Some(def) = v.tables.expr_ty(expr).ty_adt_def() {
+                if def.is_union() {
+                    v.promotable = false
+                }
+            }
+        }
+
+        hir::ExprBlock(..) |
         hir::ExprIndex(..) |
-        hir::ExprField(..) |
         hir::ExprArray(_) |
         hir::ExprType(..) |
         hir::ExprTup(..) => {}
@@ -478,6 +526,14 @@ impl<'a, 'gcx, 'tcx> euv::Delegate<'tcx> for CheckCrateVisitor<'a, 'gcx> {
               _loan_region: ty::Region<'tcx>,
               bk: ty::BorrowKind,
               loan_cause: euv::LoanCause) {
+        debug!(
+            "borrow(borrow_id={:?}, cmt={:?}, bk={:?}, loan_cause={:?})",
+            borrow_id,
+            cmt,
+            bk,
+            loan_cause,
+        );
+
         // Kind of hacky, but we allow Unsafe coercions in constants.
         // These occur when we convert a &T or *T to a *U, as well as
         // when making a thin pointer (e.g., `*T`) into a fat pointer

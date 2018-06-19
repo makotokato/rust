@@ -21,7 +21,7 @@ use syntax::ext::base::ExtCtxt;
 use syntax::ext::base::Resolver;
 use syntax::ext::build::AstBuilder;
 use syntax::ext::expand::ExpansionConfig;
-use syntax::ext::hygiene::{Mark, SyntaxContext};
+use syntax::ext::hygiene::{self, Mark, SyntaxContext};
 use syntax::fold::{self, Folder};
 use syntax::parse::ParseSess;
 use syntax::ptr::P;
@@ -86,6 +86,7 @@ impl<'a> Folder for ExpandAllocatorDirectives<'a> {
                 span: None,
                 allow_internal_unstable: true,
                 allow_internal_unsafe: false,
+                edition: hygiene::default_edition(),
             },
         });
         let span = item.span.with_ctxt(SyntaxContext::empty().apply_mark(mark));
@@ -236,7 +237,7 @@ impl<'a> AllocFnFactory<'a> {
                 let ident = ident();
                 args.push(self.cx.arg(self.span, ident, self.ptr_u8()));
                 let arg = self.cx.expr_ident(self.span, ident);
-                self.cx.expr_cast(self.span, arg, self.ptr_opaque())
+                self.cx.expr_cast(self.span, arg, self.ptr_u8())
             }
 
             AllocatorTy::Usize => {
@@ -279,18 +280,5 @@ impl<'a> AllocFnFactory<'a> {
         let u8 = self.cx.path_ident(self.span, Ident::from_str("u8"));
         let ty_u8 = self.cx.ty_path(u8);
         self.cx.ty_ptr(self.span, ty_u8, Mutability::Mutable)
-    }
-
-    fn ptr_opaque(&self) -> P<Ty> {
-        let opaque = self.cx.path(
-            self.span,
-            vec![
-                self.core,
-                Ident::from_str("alloc"),
-                Ident::from_str("Opaque"),
-            ],
-        );
-        let ty_opaque = self.cx.ty_path(opaque);
-        self.cx.ty_ptr(self.span, ty_opaque, Mutability::Mutable)
     }
 }

@@ -141,7 +141,7 @@ fn fn_contains_unsafe<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, src: MirSource) -> 
             }
             // Check if this is an unsafe block, or an item
             match node {
-                Node::NodeExpr(&hir::Expr { node: hir::ExprBlock(ref block), ..}) => {
+                Node::NodeExpr(&hir::Expr { node: hir::ExprBlock(ref block, _), ..}) => {
                     if block_is_unsafe(&*block) {
                         // Found an unsafe block, we can bail out here.
                         return true;
@@ -231,7 +231,7 @@ impl MirPass for AddValidation {
         // Add an AcquireValid at the beginning of the start block.
         {
             let source_info = SourceInfo {
-                scope: ARGUMENT_VISIBILITY_SCOPE,
+                scope: OUTERMOST_SOURCE_SCOPE,
                 span: mir.span, // FIXME: Consider using just the span covering the function
                                 // argument declaration.
             };

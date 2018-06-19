@@ -97,6 +97,9 @@ pub fn try_inline(cx: &DocContext, def: Def, name: ast::Name, visited: &mut FxHa
             record_extern_fqn(cx, did, clean::TypeKind::Const);
             clean::ConstantItem(build_const(cx, did))
         }
+        // Macros are eagerly inlined back in visit_ast, don't show their export statements
+        // FIXME(50647): the eager inline does not take doc(hidden)/doc(no_inline) into account
+        Def::Macro(..) => return Some(Vec::new()),
         _ => return None,
     };
     cx.renderinfo.borrow_mut().inlined.insert(did);
@@ -111,6 +114,23 @@ pub fn try_inline(cx: &DocContext, def: Def, name: ast::Name, visited: &mut FxHa
         def_id: did,
     });
     Some(ret)
+}
+
+pub fn try_inline_glob(cx: &DocContext, def: Def, visited: &mut FxHashSet<DefId>)
+    -> Option<Vec<clean::Item>>
+{
+    if def == Def::Err { return None }
+    let did = def.def_id();
+    if did.is_local() { return None }
+
+    match def {
+        Def::Mod(did) => {
+            let m = build_module(cx, did, visited);
+            Some(m.items)
+        }
+        // glob imports on things like enums aren't inlined even for local exports, so just bail
+        _ => None,
+    }
 }
 
 pub fn load_attrs(cx: &DocContext, did: DefId) -> clean::Attributes {
@@ -302,6 +322,14 @@ pub fn build_impls(cx: &DocContext, did: DefId, auto_traits: bool) -> Vec<clean:
     for def_id in primitive_impls.iter().filter_map(|&def_id| def_id) {
         if !def_id.is_local() {
             build_impl(cx, def_id, &mut impls);
+
+            let auto_impls = get_auto_traits_with_def_id(cx, def_id);
+            let mut renderinfo = cx.renderinfo.borrow_mut();
+
+            let new_impls: Vec<clean::Item> = auto_impls.into_iter()
+                .filter(|i| renderinfo.inlined.insert(i.def_id)).collect();
+
+            impls.extend(new_impls);
         }
     }
 

@@ -17,6 +17,7 @@
 use errors::{Applicability, DiagnosticBuilder};
 use lint::{LintPass, LateLintPass, LintArray};
 use session::Session;
+use syntax::ast;
 use syntax::codemap::Span;
 
 declare_lint! {
@@ -27,7 +28,7 @@ declare_lint! {
 
 declare_lint! {
     pub CONST_ERR,
-    Warn,
+    Deny,
     "constant evaluation detected erroneous expression"
 }
 
@@ -177,12 +178,6 @@ declare_lint! {
 }
 
 declare_lint! {
-    pub LEGACY_IMPORTS,
-    Deny,
-    "detects names that resolve to ambiguous glob imports with RFC 1560"
-}
-
-declare_lint! {
     pub LEGACY_CONSTRUCTOR_VISIBILITY,
     Deny,
     "detects use of struct constructors that would be invisible with new visibility rules"
@@ -213,6 +208,12 @@ declare_lint! {
 }
 
 declare_lint! {
+    pub BAD_REPR,
+    Warn,
+    "detects incorrect use of `repr` attribute"
+}
+
+declare_lint! {
     pub DEPRECATED,
     Warn,
     "detects use of deprecated items"
@@ -231,13 +232,13 @@ declare_lint! {
 }
 
 declare_lint! {
-    pub SINGLE_USE_LIFETIME,
+    pub SINGLE_USE_LIFETIMES,
     Allow,
     "detects lifetime parameters that are only used once"
 }
 
 declare_lint! {
-    pub UNUSED_LIFETIME,
+    pub UNUSED_LIFETIMES,
     Allow,
     "detects lifetime parameters that are never used"
 }
@@ -249,19 +250,19 @@ declare_lint! {
 }
 
 declare_lint! {
-    pub ELIDED_LIFETIME_IN_PATH,
+    pub ELIDED_LIFETIMES_IN_PATHS,
     Allow,
     "hidden lifetime parameters are deprecated, try `Foo<'_>`"
 }
 
 declare_lint! {
-    pub BARE_TRAIT_OBJECT,
+    pub BARE_TRAIT_OBJECTS,
     Allow,
     "suggest using `dyn Trait` for trait objects"
 }
 
 declare_lint! {
-    pub ABSOLUTE_PATH_STARTING_WITH_MODULE,
+    pub ABSOLUTE_PATHS_NOT_STARTING_WITH_CRATE,
     Allow,
     "fully qualified paths that start with a module name \
      instead of `crate`, `self`, or an extern crate name"
@@ -274,9 +275,33 @@ declare_lint! {
 }
 
 declare_lint! {
-    pub UNSTABLE_NAME_COLLISION,
+    pub UNSTABLE_NAME_COLLISIONS,
     Warn,
     "detects name collision with an existing but unstable method"
+}
+
+declare_lint! {
+    pub UNUSED_LABELS,
+    Allow,
+    "detects labels that are never used"
+}
+
+declare_lint! {
+    pub DUPLICATE_ASSOCIATED_TYPE_BINDINGS,
+    Warn,
+    "warns about duplicate associated type bindings in generics"
+}
+
+declare_lint! {
+    pub DUPLICATE_MACRO_EXPORTS,
+    Deny,
+    "detects duplicate macro exports"
+}
+
+declare_lint! {
+    pub INTRA_DOC_LINK_RESOLUTION_FAILURE,
+    Warn,
+    "warn about documentation intra links resolution failure"
 }
 
 /// Does nothing as a lint pass, but registers some `Lint`s
@@ -314,7 +339,6 @@ impl LintPass for HardwiredLints {
             SAFE_PACKED_BORROWS,
             PATTERNS_IN_FNS_WITHOUT_BODY,
             LEGACY_DIRECTORY_OWNERSHIP,
-            LEGACY_IMPORTS,
             LEGACY_CONSTRUCTOR_VISIBILITY,
             MISSING_FRAGMENT_SPECIFIER,
             PARENTHESIZED_PARAMS_IN_TYPES_AND_MODULES,
@@ -323,13 +347,17 @@ impl LintPass for HardwiredLints {
             DEPRECATED,
             UNUSED_UNSAFE,
             UNUSED_MUT,
-            SINGLE_USE_LIFETIME,
-            UNUSED_LIFETIME,
+            SINGLE_USE_LIFETIMES,
+            UNUSED_LIFETIMES,
+            UNUSED_LABELS,
             TYVAR_BEHIND_RAW_POINTER,
-            ELIDED_LIFETIME_IN_PATH,
-            BARE_TRAIT_OBJECT,
-            ABSOLUTE_PATH_STARTING_WITH_MODULE,
-            UNSTABLE_NAME_COLLISION,
+            ELIDED_LIFETIMES_IN_PATHS,
+            BARE_TRAIT_OBJECTS,
+            ABSOLUTE_PATHS_NOT_STARTING_WITH_CRATE,
+            UNSTABLE_NAME_COLLISIONS,
+            DUPLICATE_ASSOCIATED_TYPE_BINDINGS,
+            DUPLICATE_MACRO_EXPORTS,
+            INTRA_DOC_LINK_RESOLUTION_FAILURE,
         )
     }
 }
@@ -341,6 +369,7 @@ pub enum BuiltinLintDiagnostics {
     Normal,
     BareTraitObject(Span, /* is_global */ bool),
     AbsPathWithModule(Span),
+    DuplicatedMacroExports(ast::Ident, Span, Span),
 }
 
 impl BuiltinLintDiagnostics {
@@ -372,6 +401,10 @@ impl BuiltinLintDiagnostics {
                     Err(_) => (format!("crate::<path>"), Applicability::HasPlaceholders)
                 };
                 db.span_suggestion_with_applicability(span, "use `crate`", sugg, app);
+            }
+            BuiltinLintDiagnostics::DuplicatedMacroExports(ident, earlier_span, later_span) => {
+                db.span_label(later_span, format!("`{}` already exported", ident));
+                db.span_note(earlier_span, "previous macro export is now shadowed");
             }
         }
     }

@@ -219,6 +219,8 @@ impl<'a, 'tcx, 'rcx> RustdocVisitor<'a, 'tcx, 'rcx> {
         if let Some(exports) = self.cx.tcx.module_exports(def_id) {
             for export in exports.iter().filter(|e| e.vis == Visibility::Public) {
                 if let Def::Macro(def_id, ..) = export.def {
+                    // FIXME(50647): this eager macro inlining does not take
+                    // doc(hidden)/doc(no_inline) into account
                     if def_id.krate == LOCAL_CRATE {
                         continue // These are `krate.exported_macros`, handled in `self.visit()`.
                     }
@@ -237,14 +239,15 @@ impl<'a, 'tcx, 'rcx> RustdocVisitor<'a, 'tcx, 'rcx> {
                         unreachable!()
                     };
 
+                    debug!("inlining macro {}", def.ident.name);
                     om.macros.push(Macro {
                         def_id,
                         attrs: def.attrs.clone().into(),
                         name: def.ident.name,
-                        whence: def.span,
+                        whence: self.cx.tcx.def_span(def_id),
                         matchers,
-                        stab: self.stability(def.id),
-                        depr: self.deprecation(def.id),
+                        stab: self.cx.tcx.lookup_stability(def_id).cloned(),
+                        depr: self.cx.tcx.lookup_deprecation(def_id),
                         imported_from: Some(imported_from),
                     })
                 }
@@ -360,6 +363,11 @@ impl<'a, 'tcx, 'rcx> RustdocVisitor<'a, 'tcx, 'rcx> {
                         .. it.clone()
                     }].into(),
                 });
+                true
+            }
+            hir_map::NodeStructCtor(_) if !glob => {
+                // struct constructors always show up alongside their struct definitions, we've
+                // already processed that so just discard this
                 true
             }
             _ => false,
@@ -556,11 +564,15 @@ impl<'a, 'tcx, 'rcx> RustdocVisitor<'a, 'tcx, 'rcx> {
                     om.impls.push(i);
                 }
             },
+            hir::ItemExistential(_) => {
+                // FIXME(oli-obk): actually generate docs for real existential items
+            }
         }
     }
 
     // convert each exported_macro into a doc item
     fn visit_local_macro(&self, def: &hir::MacroDef) -> Macro {
+        debug!("visit_local_macro: {}", def.name);
         let tts = def.body.trees().collect::<Vec<_>>();
         // Extract the spans of all matchers. They represent the "interface" of the macro.
         let matchers = tts.chunks(4).map(|arm| arm[0].span()).collect();

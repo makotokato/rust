@@ -270,7 +270,7 @@ impl OutputTypes {
     }
 
     // True if any of the output types require codegen or linking.
-    pub fn should_trans(&self) -> bool {
+    pub fn should_codegen(&self) -> bool {
         self.0.keys().any(|k| match *k {
             OutputType::Bitcode
             | OutputType::Assembly
@@ -492,6 +492,13 @@ impl Input {
         match *self {
             Input::File(ref ifile) => ifile.file_stem().unwrap().to_str().unwrap().to_string(),
             Input::Str { .. } => "rust_out".to_string(),
+        }
+    }
+
+    pub fn get_input(&mut self) -> Option<&mut String> {
+        match *self {
+            Input::File(_) => None,
+            Input::Str { ref mut input, .. } => Some(input),
         }
     }
 }
@@ -1135,14 +1142,14 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "count where LLVM instrs originate"),
     time_llvm_passes: bool = (false, parse_bool, [UNTRACKED_WITH_WARNING(true,
         "The output of `-Z time-llvm-passes` will only reflect timings of \
-         re-translated modules when used with incremental compilation" )],
+         re-codegened modules when used with incremental compilation" )],
         "measure time of each LLVM pass"),
     input_stats: bool = (false, parse_bool, [UNTRACKED],
         "gather statistics about the input"),
-    trans_stats: bool = (false, parse_bool, [UNTRACKED_WITH_WARNING(true,
-        "The output of `-Z trans-stats` might not be accurate when incremental \
+    codegen_stats: bool = (false, parse_bool, [UNTRACKED_WITH_WARNING(true,
+        "The output of `-Z codegen-stats` might not be accurate when incremental \
          compilation is enabled")],
-        "gather trans statistics"),
+        "gather codegen statistics"),
     asm_comments: bool = (false, parse_bool, [TRACKED],
         "generate comments into the assembly (may change behavior)"),
     no_verify: bool = (false, parse_bool, [TRACKED],
@@ -1183,8 +1190,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
           Use with RUST_REGION_GRAPH=help for more info"),
     parse_only: bool = (false, parse_bool, [UNTRACKED],
           "parse only; do not compile, assemble, or link"),
-    no_trans: bool = (false, parse_bool, [TRACKED],
-          "run all passes except translation; no output"),
+    no_codegen: bool = (false, parse_bool, [TRACKED],
+          "run all passes except codegen; no output"),
     treat_err_as_bug: bool = (false, parse_bool, [TRACKED],
           "treat all errors that occur as bugs"),
     external_macro_backtrace: bool = (false, parse_bool, [UNTRACKED],
@@ -1235,16 +1242,16 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
           "show spans for compiler debugging (expr|pat|ty)"),
     print_type_sizes: bool = (false, parse_bool, [UNTRACKED],
           "print layout information for each type encountered"),
-    print_trans_items: Option<String> = (None, parse_opt_string, [UNTRACKED],
-          "print the result of the translation item collection pass"),
+    print_mono_items: Option<String> = (None, parse_opt_string, [UNTRACKED],
+          "print the result of the monomorphization collection pass"),
     mir_opt_level: usize = (1, parse_uint, [TRACKED],
           "set the MIR optimization level (0-3, default: 1)"),
-    mutable_noalias: bool = (false, parse_bool, [UNTRACKED],
-          "emit noalias metadata for mutable references"),
-    arg_align_attributes: bool = (false, parse_bool, [UNTRACKED],
+    mutable_noalias: Option<bool> = (None, parse_opt_bool, [TRACKED],
+          "emit noalias metadata for mutable references (default: yes on LLVM >= 6)"),
+    arg_align_attributes: bool = (false, parse_bool, [TRACKED],
           "emit align metadata for reference arguments"),
     dump_mir: Option<String> = (None, parse_opt_string, [UNTRACKED],
-          "dump MIR state at various points in translation"),
+          "dump MIR state at various points in transforms"),
     dump_mir_dir: String = (String::from("mir_dump"), parse_string, [UNTRACKED],
           "the directory the MIR is dumped into"),
     dump_mir_graphviz: bool = (false, parse_bool, [UNTRACKED],
@@ -1290,14 +1297,20 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         useful for profiling / PGO."),
     relro_level: Option<RelroLevel> = (None, parse_relro_level, [TRACKED],
         "choose which RELRO level to use"),
+    disable_ast_check_for_mutation_in_guard: bool = (false, parse_bool, [UNTRACKED],
+        "skip AST-based mutation-in-guard check (mir-borrowck provides more precise check)"),
     nll_subminimal_causes: bool = (false, parse_bool, [UNTRACKED],
         "when tracking region error causes, accept subminimal results for faster execution."),
     nll_facts: bool = (false, parse_bool, [UNTRACKED],
                        "dump facts from NLL analysis into side files"),
     disable_nll_user_type_assert: bool = (false, parse_bool, [UNTRACKED],
         "disable user provided type assertion in NLL"),
-    trans_time_graph: bool = (false, parse_bool, [UNTRACKED],
-        "generate a graphical HTML report of time spent in trans and LLVM"),
+    nll_dont_emit_read_for_match: bool = (false, parse_bool, [UNTRACKED],
+        "in match codegen, do not include ReadForMatch statements (used by mir-borrowck)"),
+    polonius: bool = (false, parse_bool, [UNTRACKED],
+        "enable polonius-based borrow-checker"),
+    codegen_time_graph: bool = (false, parse_bool, [UNTRACKED],
+        "generate a graphical HTML report of time spent in codegen and LLVM"),
     thinlto: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "enable ThinLTO when possible"),
     inline_in_all_cgus: Option<bool> = (None, parse_opt_bool, [TRACKED],
@@ -1309,15 +1322,13 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
          the max/min integer respectively, and NaN is mapped to 0"),
     lower_128bit_ops: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "rewrite operators on i128 and u128 into lang item calls (typically provided \
-         by compiler-builtins) so translation doesn't need to support them,
+         by compiler-builtins) so codegen doesn't need to support them,
          overriding the default for the current target"),
     human_readable_cgu_names: bool = (false, parse_bool, [TRACKED],
         "generate human-readable, predictable names for codegen units"),
     dep_info_omit_d_target: bool = (false, parse_bool, [TRACKED],
         "in dep-info output, omit targets for tracking dependencies of the dep-info files \
          themselves"),
-    suggestion_applicability: bool = (false, parse_bool, [UNTRACKED],
-        "include machine-applicability of suggestions in JSON output"),
     unpretty: Option<String> = (None, parse_unpretty, [UNTRACKED],
         "Present the input source, unstable (and less-pretty) variants;
         valid types are any of the types for `--pretty`, as well as:
@@ -1339,6 +1350,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
           "enable the experimental Chalk-based trait solving engine"),
     cross_lang_lto: CrossLangLto = (CrossLangLto::Disabled, parse_cross_lang_lto, [TRACKED],
           "generate build artifacts that are compatible with linker-based LTO."),
+    no_parallel_llvm: bool = (false, parse_bool, [UNTRACKED],
+          "don't run LLVM in parallel (while keeping codegen-units and ThinLTO)"),
 }
 
 pub fn default_lib_output() -> CrateType {
@@ -1791,19 +1804,7 @@ pub fn build_session_options_and_crate_config(
             Some("human") => ErrorOutputType::HumanReadable(color),
             Some("json") => ErrorOutputType::Json(false),
             Some("pretty-json") => ErrorOutputType::Json(true),
-            Some("short") => {
-                if nightly_options::is_unstable_enabled(matches) {
-                    ErrorOutputType::Short(color)
-                } else {
-                    early_error(
-                        ErrorOutputType::default(),
-                        &format!(
-                            "the `-Z unstable-options` flag must also be passed to \
-                             enable the short error message option"
-                        ),
-                    );
-                }
-            }
+            Some("short") => ErrorOutputType::Short(color),
             None => ErrorOutputType::HumanReadable(color),
 
             Some(arg) => early_error(
@@ -2020,27 +2021,15 @@ pub fn build_session_options_and_crate_config(
             }
             OptLevel::Default
         } else {
-            match (
-                cg.opt_level.as_ref().map(String::as_ref),
-                nightly_options::is_nightly_build(),
-            ) {
-                (None, _) => OptLevel::No,
-                (Some("0"), _) => OptLevel::No,
-                (Some("1"), _) => OptLevel::Less,
-                (Some("2"), _) => OptLevel::Default,
-                (Some("3"), _) => OptLevel::Aggressive,
-                (Some("s"), true) => OptLevel::Size,
-                (Some("z"), true) => OptLevel::SizeMin,
-                (Some("s"), false) | (Some("z"), false) => {
-                    early_error(
-                        error_format,
-                        &format!(
-                            "the optimizations s or z are only \
-                             accepted on the nightly compiler"
-                        ),
-                    );
-                }
-                (Some(arg), _) => {
+            match cg.opt_level.as_ref().map(String::as_ref) {
+                None => OptLevel::No,
+                Some("0") => OptLevel::No,
+                Some("1") => OptLevel::Less,
+                Some("2") => OptLevel::Default,
+                Some("3") => OptLevel::Aggressive,
+                Some("s") => OptLevel::Size,
+                Some("z") => OptLevel::SizeMin,
+                Some(arg) => {
                     early_error(
                         error_format,
                         &format!(
@@ -3047,7 +3036,7 @@ mod tests {
         assert_eq!(reference.dep_tracking_hash(), opts.dep_tracking_hash());
         opts.debugging_opts.input_stats = true;
         assert_eq!(reference.dep_tracking_hash(), opts.dep_tracking_hash());
-        opts.debugging_opts.trans_stats = true;
+        opts.debugging_opts.codegen_stats = true;
         assert_eq!(reference.dep_tracking_hash(), opts.dep_tracking_hash());
         opts.debugging_opts.borrowck_stats = true;
         assert_eq!(reference.dep_tracking_hash(), opts.dep_tracking_hash());
@@ -3093,7 +3082,7 @@ mod tests {
         assert_eq!(reference.dep_tracking_hash(), opts.dep_tracking_hash());
         opts.debugging_opts.keep_ast = true;
         assert_eq!(reference.dep_tracking_hash(), opts.dep_tracking_hash());
-        opts.debugging_opts.print_trans_items = Some(String::from("abc"));
+        opts.debugging_opts.print_mono_items = Some(String::from("abc"));
         assert_eq!(reference.dep_tracking_hash(), opts.dep_tracking_hash());
         opts.debugging_opts.dump_mir = Some(String::from("abc"));
         assert_eq!(reference.dep_tracking_hash(), opts.dep_tracking_hash());
@@ -3120,7 +3109,7 @@ mod tests {
         assert!(reference.dep_tracking_hash() != opts.dep_tracking_hash());
 
         opts = reference.clone();
-        opts.debugging_opts.no_trans = true;
+        opts.debugging_opts.no_codegen = true;
         assert!(reference.dep_tracking_hash() != opts.dep_tracking_hash());
 
         opts = reference.clone();
