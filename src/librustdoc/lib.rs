@@ -18,6 +18,7 @@
 #![feature(box_patterns)]
 #![feature(box_syntax)]
 #![feature(fs_read_write)]
+#![feature(iterator_find_map)]
 #![feature(set_stdio)]
 #![feature(slice_sort_by_cached_key)]
 #![feature(test)]
@@ -46,7 +47,7 @@ extern crate test as testing;
 #[macro_use] extern crate log;
 extern crate rustc_errors as errors;
 extern crate pulldown_cmark;
-extern crate tempdir;
+extern crate tempfile;
 extern crate minifier;
 
 extern crate serialize as rustc_serialize; // used by deriving
