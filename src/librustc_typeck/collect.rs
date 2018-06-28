@@ -419,7 +419,7 @@ fn convert_item<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, item_id: ast::NodeId) {
                 convert_variant_ctor(tcx, struct_def.id());
             }
         },
-        hir::ItemExistential(..) |
+        hir::ItemExistential(..) => {}
         hir::ItemTy(..) | hir::ItemStatic(..) | hir::ItemConst(..) | hir::ItemFn(..) => {
             tcx.generics_of(def_id);
             tcx.type_of(def_id);
@@ -1066,24 +1066,7 @@ fn type_of<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                 ItemExistential(hir::ExistTy { impl_trait_fn: None, .. }) => unimplemented!(),
                 // existential types desugared from impl Trait
                 ItemExistential(hir::ExistTy { impl_trait_fn: Some(owner), .. }) => {
-                    tcx.typeck_tables_of(owner).concrete_existential_types
-                        .get(&def_id)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            // This can occur if some error in the
-                            // owner fn prevented us from populating
-                            // the `concrete_existential_types` table.
-                            tcx.sess.delay_span_bug(
-                                DUMMY_SP,
-                                &format!(
-                                    "owner {:?} has no existential type for {:?} in its tables",
-                                    owner,
-                                    def_id,
-                                ),
-                            );
-
-                            tcx.types.err
-                        })
+                    tcx.typeck_tables_of(owner).concrete_existential_types[&def_id]
                 },
                 ItemTrait(..) | ItemTraitAlias(..) |
                 ItemMod(..) |
@@ -1181,13 +1164,13 @@ fn fn_sig<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let icx = ItemCtxt::new(tcx, def_id);
 
     match tcx.hir.get(node_id) {
-        NodeTraitItem(&hir::TraitItem { node: TraitItemKind::Method(ref sig, _), .. }) |
-        NodeImplItem(&hir::ImplItem { node: ImplItemKind::Method(ref sig, _), .. }) => {
-            AstConv::ty_of_fn(&icx, sig.unsafety, sig.abi, &sig.decl)
+        NodeTraitItem(hir::TraitItem { node: TraitItemKind::Method(sig, _), .. }) |
+        NodeImplItem(hir::ImplItem { node: ImplItemKind::Method(sig, _), .. }) => {
+            AstConv::ty_of_fn(&icx, sig.header.unsafety, sig.header.abi, &sig.decl)
         }
 
-        NodeItem(&hir::Item { node: ItemFn(ref decl, unsafety, _, abi, _, _), .. }) => {
-            AstConv::ty_of_fn(&icx, unsafety, abi, decl)
+        NodeItem(hir::Item { node: ItemFn(decl, header, _, _), .. }) => {
+            AstConv::ty_of_fn(&icx, header.unsafety, header.abi, decl)
         }
 
         NodeForeignItem(&hir::ForeignItem { node: ForeignItemFn(ref fn_decl, _, _), .. }) => {
@@ -1898,11 +1881,18 @@ fn codegen_fn_attrs<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, id: DefId) -> Codegen
                 }
             });
         } else if attr.check_name("export_name") {
-            if let s @ Some(_) = attr.value_str() {
-                codegen_fn_attrs.export_name = s;
+            if let Some(s) = attr.value_str() {
+                if s.as_str().contains("\0") {
+                    // `#[export_name = ...]` will be converted to a null-terminated string,
+                    // so it may not contain any null characters.
+                    struct_span_err!(tcx.sess, attr.span, E0648,
+                                     "`export_name` may not contain null characters")
+                        .emit();
+                }
+                codegen_fn_attrs.export_name = Some(s);
             } else {
                 struct_span_err!(tcx.sess, attr.span, E0558,
-                                    "export_name attribute has invalid format")
+                                 "`export_name` attribute has invalid format")
                     .span_label(attr.span, "did you mean #[export_name=\"*\"]?")
                     .emit();
             }

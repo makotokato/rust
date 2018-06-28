@@ -391,15 +391,12 @@ impl_stable_hash_for!(enum ::syntax::ast::MetaItemKind {
 
 impl_stable_hash_for!(struct ::syntax_pos::hygiene::ExpnInfo {
     call_site,
-    callee
-});
-
-impl_stable_hash_for!(struct ::syntax_pos::hygiene::NameAndSpan {
+    def_site,
     format,
     allow_internal_unstable,
     allow_internal_unsafe,
-    edition,
-    span
+    local_inner_macros,
+    edition
 });
 
 impl_stable_hash_for!(enum ::syntax_pos::hygiene::ExpnFormat {
@@ -409,6 +406,7 @@ impl_stable_hash_for!(enum ::syntax_pos::hygiene::ExpnFormat {
 });
 
 impl_stable_hash_for!(enum ::syntax_pos::hygiene::CompilerDesugaringKind {
+    Async,
     DotFill,
     QuestionMark,
     ExistentialReturnType,

@@ -19,11 +19,11 @@ use ast::{Constness, Crate};
 use ast::Defaultness;
 use ast::EnumDef;
 use ast::{Expr, ExprKind, RangeLimits};
-use ast::{Field, FnDecl};
+use ast::{Field, FnDecl, FnHeader};
 use ast::{ForeignItem, ForeignItemKind, FunctionRetTy};
 use ast::{GenericParam, GenericParamKind};
 use ast::GenericArg;
-use ast::{Ident, ImplItem, IsAuto, Item, ItemKind};
+use ast::{Ident, ImplItem, IsAsync, IsAuto, Item, ItemKind};
 use ast::{Label, Lifetime, Lit, LitKind};
 use ast::Local;
 use ast::MacStmtStyle;
@@ -43,7 +43,7 @@ use ast::{BinOpKind, UnOp};
 use ast::{RangeEnd, RangeSyntax};
 use {ast, attr};
 use codemap::{self, CodeMap, Spanned, respan};
-use syntax_pos::{self, Span, MultiSpan, BytePos, FileName, DUMMY_SP};
+use syntax_pos::{self, Span, MultiSpan, BytePos, FileName, DUMMY_SP, edition::Edition};
 use errors::{self, Applicability, DiagnosticBuilder};
 use parse::{self, SeqSep, classify, token};
 use parse::lexer::TokenAndSpan;
@@ -776,6 +776,9 @@ impl<'a> Parser<'a> {
             err.span_label(self.span, format!("expected identifier, found {}", token_descr));
         } else {
             err.span_label(self.span, "expected identifier");
+            if self.token == token::Comma && self.look_ahead(1, |t| t.is_ident()) {
+                err.span_suggestion(self.span, "remove this comma", "".into());
+            }
         }
         err
     }
@@ -1057,7 +1060,7 @@ impl<'a> Parser<'a> {
     /// Parse a sequence, not including the closing delimiter. The function
     /// f must consume tokens until reaching the next separator or
     /// closing bracket.
-    fn parse_seq_to_before_end<T, F>(&mut self,
+    pub fn parse_seq_to_before_end<T, F>(&mut self,
                                          ket: &token::Token,
                                          sep: SeqSep,
                                          f: F)
@@ -1293,6 +1296,15 @@ impl<'a> Parser<'a> {
         })))
     }
 
+    /// Parse asyncness: `async` or nothing
+    fn parse_asyncness(&mut self) -> IsAsync {
+        if self.eat_keyword(keywords::Async) {
+            IsAsync::Async(ast::DUMMY_NODE_ID)
+        } else {
+            IsAsync::NotAsync
+        }
+    }
+
     /// Parse unsafety: `unsafe` or nothing.
     fn parse_unsafety(&mut self) -> Unsafety {
         if self.eat_keyword(keywords::Unsafe) {
@@ -1342,7 +1354,7 @@ impl<'a> Parser<'a> {
             // trait item macro.
             (keywords::Invalid.ident(), ast::TraitItemKind::Macro(mac), ast::Generics::default())
         } else {
-            let (constness, unsafety, abi) = self.parse_fn_front_matter()?;
+            let (constness, unsafety, asyncness, abi) = self.parse_fn_front_matter()?;
 
             let ident = self.parse_ident()?;
             let mut generics = self.parse_generics()?;
@@ -1356,10 +1368,13 @@ impl<'a> Parser<'a> {
             generics.where_clause = self.parse_where_clause()?;
 
             let sig = ast::MethodSig {
-                unsafety,
-                constness,
+                header: FnHeader {
+                    unsafety,
+                    constness,
+                    abi,
+                    asyncness,
+                },
                 decl: d,
-                abi,
             };
 
             let body = match self.token {
@@ -2117,7 +2132,7 @@ impl<'a> Parser<'a> {
         ExprKind::AssignOp(binop, lhs, rhs)
     }
 
-    fn mk_mac_expr(&mut self, span: Span, m: Mac_, attrs: ThinVec<Attribute>) -> P<Expr> {
+    pub fn mk_mac_expr(&mut self, span: Span, m: Mac_, attrs: ThinVec<Attribute>) -> P<Expr> {
         P(Expr {
             id: ast::DUMMY_NODE_ID,
             node: ExprKind::Mac(codemap::Spanned {node: m, span: span}),
@@ -2254,6 +2269,15 @@ impl<'a> Parser<'a> {
                     let (qself, path) = self.parse_qpath(PathStyle::Expr)?;
                     hi = path.span;
                     return Ok(self.mk_expr(lo.to(hi), ExprKind::Path(Some(qself), path), attrs));
+                }
+                if self.span.edition() >= Edition::Edition2018 &&
+                    self.check_keyword(keywords::Async)
+                {
+                    if self.is_async_block() { // check for `async {` and `async move {`
+                        return self.parse_async_block(attrs);
+                    } else {
+                        return self.parse_lambda_expr(attrs);
+                    }
                 }
                 if self.check_keyword(keywords::Move) || self.check_keyword(keywords::Static) {
                     return self.parse_lambda_expr(attrs);
@@ -2446,8 +2470,14 @@ impl<'a> Parser<'a> {
                 Err(mut e) => {
                     e.span_label(struct_sp, "while parsing this struct");
                     e.emit();
-                    self.recover_stmt();
-                    break;
+
+                    // If the next token is a comma, then try to parse
+                    // what comes next as additional fields, rather than
+                    // bailing out until next `}`.
+                    if self.token != token::Comma {
+                        self.recover_stmt();
+                        break;
+                    }
                 }
             }
 
@@ -3249,6 +3279,13 @@ impl<'a> Parser<'a> {
         } else {
             Movability::Movable
         };
+        let asyncness = if self.span.edition() >= Edition::Edition2018
+            && self.eat_keyword(keywords::Async)
+        {
+            IsAsync::Async(ast::DUMMY_NODE_ID)
+        } else {
+            IsAsync::NotAsync
+        };
         let capture_clause = if self.eat_keyword(keywords::Move) {
             CaptureBy::Value
         } else {
@@ -3271,7 +3308,7 @@ impl<'a> Parser<'a> {
 
         Ok(self.mk_expr(
             lo.to(body.span),
-            ExprKind::Closure(capture_clause, movability, decl, body, lo.to(decl_hi)),
+            ExprKind::Closure(capture_clause, asyncness, movability, decl, body, lo.to(decl_hi)),
             attrs))
     }
 
@@ -3347,6 +3384,24 @@ impl<'a> Parser<'a> {
         attrs.extend(iattrs);
         let span = span_lo.to(body.span);
         Ok(self.mk_expr(span, ExprKind::Loop(body, opt_label), attrs))
+    }
+
+    /// Parse an `async move {...}` expression
+    pub fn parse_async_block(&mut self, mut attrs: ThinVec<Attribute>)
+        -> PResult<'a, P<Expr>>
+    {
+        let span_lo = self.span;
+        self.expect_keyword(keywords::Async)?;
+        let capture_clause = if self.eat_keyword(keywords::Move) {
+            CaptureBy::Value
+        } else {
+            CaptureBy::Ref
+        };
+        let (iattrs, body) = self.parse_inner_attrs_and_block()?;
+        attrs.extend(iattrs);
+        Ok(self.mk_expr(
+            span_lo.to(body.span),
+            ExprKind::Async(capture_clause, ast::DUMMY_NODE_ID, body), attrs))
     }
 
     /// Parse a `do catch {...}` expression (`do catch` token already eaten)
@@ -3969,12 +4024,14 @@ impl<'a> Parser<'a> {
                             _ => panic!("can only parse `..`/`...`/`..=` for ranges \
                                          (checked above)"),
                         };
+                        let op_span = self.span;
                         // Parse range
                         let span = lo.to(self.prev_span);
                         let begin = self.mk_expr(span, ExprKind::Path(qself, path), ThinVec::new());
                         self.bump();
                         let end = self.parse_pat_range_end()?;
-                        pat = PatKind::Range(begin, end, end_kind);
+                        let op = Spanned { span: op_span, node: end_kind };
+                        pat = PatKind::Range(begin, end, op);
                     }
                     token::OpenDelim(token::Brace) => {
                         if qself.is_some() {
@@ -4010,17 +4067,22 @@ impl<'a> Parser<'a> {
                 // Try to parse everything else as literal with optional minus
                 match self.parse_literal_maybe_minus() {
                     Ok(begin) => {
-                        if self.eat(&token::DotDotDot) {
+                        let op_span = self.span;
+                        if self.check(&token::DotDot) || self.check(&token::DotDotEq) ||
+                                self.check(&token::DotDotDot) {
+                            let end_kind = if self.eat(&token::DotDotDot) {
+                                RangeEnd::Included(RangeSyntax::DotDotDot)
+                            } else if self.eat(&token::DotDotEq) {
+                                RangeEnd::Included(RangeSyntax::DotDotEq)
+                            } else if self.eat(&token::DotDot) {
+                                RangeEnd::Excluded
+                            } else {
+                                panic!("impossible case: we already matched \
+                                        on a range-operator token")
+                            };
                             let end = self.parse_pat_range_end()?;
-                            pat = PatKind::Range(begin, end,
-                                    RangeEnd::Included(RangeSyntax::DotDotDot));
-                        } else if self.eat(&token::DotDotEq) {
-                            let end = self.parse_pat_range_end()?;
-                            pat = PatKind::Range(begin, end,
-                                    RangeEnd::Included(RangeSyntax::DotDotEq));
-                        } else if self.eat(&token::DotDot) {
-                            let end = self.parse_pat_range_end()?;
-                            pat = PatKind::Range(begin, end, RangeEnd::Excluded);
+                            let op = Spanned { span: op_span, node: end_kind };
+                            pat = PatKind::Range(begin, end, op);
                         } else {
                             pat = PatKind::Lit(begin);
                         }
@@ -4041,7 +4103,9 @@ impl<'a> Parser<'a> {
 
         if !allow_range_pat {
             match pat.node {
-                PatKind::Range(_, _, RangeEnd::Included(RangeSyntax::DotDotDot)) => {}
+                PatKind::Range(
+                    _, _, Spanned { node: RangeEnd::Included(RangeSyntax::DotDotDot), .. }
+                ) => {},
                 PatKind::Range(..) => {
                     let mut err = self.struct_span_err(
                         pat.span,
@@ -4281,6 +4345,18 @@ impl<'a> Parser<'a> {
             self.recover_stmt_(SemiColonMode::Break, BlockMode::Ignore);
             None
         })
+    }
+
+    fn is_async_block(&mut self) -> bool {
+        self.token.is_keyword(keywords::Async) &&
+        (
+            ( // `async move {`
+                self.look_ahead(1, |t| t.is_keyword(keywords::Move)) &&
+                self.look_ahead(2, |t| *t == token::OpenDelim(token::Brace))
+            ) || ( // `async {`
+                self.look_ahead(1, |t| *t == token::OpenDelim(token::Brace))
+            )
+        )
     }
 
     fn is_catch_expr(&mut self) -> bool {
@@ -4709,7 +4785,7 @@ impl<'a> Parser<'a> {
                 if macro_legacy_warnings && self.token != token::Semi {
                     self.warn_missing_semicolon();
                 } else {
-                    self.expect_one_of(&[token::Semi], &[])?;
+                    self.expect_one_of(&[], &[token::Semi])?;
                 }
             }
             _ => {}
@@ -4733,12 +4809,14 @@ impl<'a> Parser<'a> {
 
     fn err_dotdotdot_syntax(&self, span: Span) {
         self.diagnostic().struct_span_err(span, {
-            "`...` syntax cannot be used in expressions"
-        }).help({
-            "Use `..` if you need an exclusive range (a < b)"
-        }).help({
-            "or `..=` if you need an inclusive range (a <= b)"
-        }).emit();
+            "unexpected token: `...`"
+        }).span_suggestion_with_applicability(
+            span, "use `..` for an exclusive range", "..".to_owned(),
+            Applicability::MaybeIncorrect
+        ).span_suggestion_with_applicability(
+            span, "or `..=` for an inclusive range", "..=".to_owned(),
+            Applicability::MaybeIncorrect
+        ).emit();
     }
 
     // Parse bounds of a type parameter `BOUND + BOUND + BOUND`, possibly with trailing `+`.
@@ -5349,6 +5427,7 @@ impl<'a> Parser<'a> {
     /// Parse an item-position function declaration.
     fn parse_item_fn(&mut self,
                      unsafety: Unsafety,
+                     asyncness: IsAsync,
                      constness: Spanned<Constness>,
                      abi: Abi)
                      -> PResult<'a, ItemInfo> {
@@ -5356,7 +5435,8 @@ impl<'a> Parser<'a> {
         let decl = self.parse_fn_decl(false)?;
         generics.where_clause = self.parse_where_clause()?;
         let (inner_attrs, body) = self.parse_inner_attrs_and_block()?;
-        Ok((ident, ItemKind::Fn(decl, unsafety, constness, abi, generics, body), Some(inner_attrs)))
+        let header = FnHeader { unsafety, asyncness, constness, abi };
+        Ok((ident, ItemKind::Fn(decl, header, generics, body), Some(inner_attrs)))
     }
 
     /// true if we are looking at `const ID`, false for things like `const fn` etc
@@ -5374,10 +5454,18 @@ impl<'a> Parser<'a> {
     /// - `const unsafe fn`
     /// - `extern fn`
     /// - etc
-    fn parse_fn_front_matter(&mut self) -> PResult<'a, (Spanned<Constness>, Unsafety, Abi)> {
+    fn parse_fn_front_matter(&mut self)
+        -> PResult<'a, (
+            Spanned<Constness>,
+            Unsafety,
+            IsAsync,
+            Abi
+        )>
+    {
         let is_const_fn = self.eat_keyword(keywords::Const);
         let const_span = self.prev_span;
         let unsafety = self.parse_unsafety();
+        let asyncness = self.parse_asyncness();
         let (constness, unsafety, abi) = if is_const_fn {
             (respan(const_span, Constness::Const), unsafety, Abi::Rust)
         } else {
@@ -5389,11 +5477,11 @@ impl<'a> Parser<'a> {
             (respan(self.prev_span, Constness::NotConst), unsafety, abi)
         };
         self.expect_keyword(keywords::Fn)?;
-        Ok((constness, unsafety, abi))
+        Ok((constness, unsafety, asyncness, abi))
     }
 
     /// Parse an impl item.
-    crate fn parse_impl_item(&mut self, at_end: &mut bool) -> PResult<'a, ImplItem> {
+    pub fn parse_impl_item(&mut self, at_end: &mut bool) -> PResult<'a, ImplItem> {
         maybe_whole!(self, NtImplItem, |x| x);
         let attrs = self.parse_outer_attributes()?;
         let (mut item, tokens) = self.collect_tokens(|this| {
@@ -5524,19 +5612,18 @@ impl<'a> Parser<'a> {
             Ok((keywords::Invalid.ident(), vec![], ast::Generics::default(),
                 ast::ImplItemKind::Macro(mac)))
         } else {
-            let (constness, unsafety, abi) = self.parse_fn_front_matter()?;
+            let (constness, unsafety, asyncness, abi) = self.parse_fn_front_matter()?;
             let ident = self.parse_ident()?;
             let mut generics = self.parse_generics()?;
             let decl = self.parse_fn_decl_with_self(|p| p.parse_arg())?;
             generics.where_clause = self.parse_where_clause()?;
             *at_end = true;
             let (inner_attrs, body) = self.parse_inner_attrs_and_block()?;
-            Ok((ident, inner_attrs, generics, ast::ImplItemKind::Method(ast::MethodSig {
-                abi,
-                unsafety,
-                constness,
-                decl,
-             }, body)))
+            let header = ast::FnHeader { abi, unsafety, constness, asyncness };
+            Ok((ident, inner_attrs, generics, ast::ImplItemKind::Method(
+                ast::MethodSig { header, decl },
+                body
+            )))
         }
     }
 
@@ -6622,6 +6709,7 @@ impl<'a> Parser<'a> {
                 let abi = opt_abi.unwrap_or(Abi::C);
                 let (ident, item_, extra_attrs) =
                     self.parse_item_fn(Unsafety::Normal,
+                                       IsAsync::NotAsync,
                                        respan(fn_span, Constness::NotConst),
                                        abi)?;
                 let prev_span = self.prev_span;
@@ -6665,6 +6753,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let (ident, item_, extra_attrs) =
                     self.parse_item_fn(unsafety,
+                                       IsAsync::NotAsync,
                                        respan(const_span, Constness::Const),
                                        Abi::Rust)?;
                 let prev_span = self.prev_span;
@@ -6684,6 +6773,34 @@ impl<'a> Parser<'a> {
                                  .emit();
             }
             let (ident, item_, extra_attrs) = self.parse_item_const(None)?;
+            let prev_span = self.prev_span;
+            let item = self.mk_item(lo.to(prev_span),
+                                    ident,
+                                    item_,
+                                    visibility,
+                                    maybe_append(attrs, extra_attrs));
+            return Ok(Some(item));
+        }
+
+        // `unsafe async fn` or `async fn`
+        if (
+            self.check_keyword(keywords::Unsafe) &&
+            self.look_ahead(1, |t| t.is_keyword(keywords::Async))
+        ) || (
+            self.check_keyword(keywords::Async) &&
+            self.look_ahead(1, |t| t.is_keyword(keywords::Fn))
+        )
+        {
+            // ASYNC FUNCTION ITEM
+            let unsafety = self.parse_unsafety();
+            self.expect_keyword(keywords::Async)?;
+            self.expect_keyword(keywords::Fn)?;
+            let fn_span = self.prev_span;
+            let (ident, item_, extra_attrs) =
+                self.parse_item_fn(unsafety,
+                                   IsAsync::Async(ast::DUMMY_NODE_ID),
+                                   respan(fn_span, Constness::NotConst),
+                                   Abi::Rust)?;
             let prev_span = self.prev_span;
             let item = self.mk_item(lo.to(prev_span),
                                     ident,
@@ -6737,6 +6854,7 @@ impl<'a> Parser<'a> {
             let fn_span = self.prev_span;
             let (ident, item_, extra_attrs) =
                 self.parse_item_fn(Unsafety::Normal,
+                                   IsAsync::NotAsync,
                                    respan(fn_span, Constness::NotConst),
                                    Abi::Rust)?;
             let prev_span = self.prev_span;
@@ -6762,6 +6880,7 @@ impl<'a> Parser<'a> {
             let fn_span = self.prev_span;
             let (ident, item_, extra_attrs) =
                 self.parse_item_fn(Unsafety::Unsafe,
+                                   IsAsync::NotAsync,
                                    respan(fn_span, Constness::NotConst),
                                    abi)?;
             let prev_span = self.prev_span;
@@ -7226,7 +7345,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_optional_str(&mut self) -> Option<(Symbol, ast::StrStyle, Option<ast::Name>)> {
+    pub fn parse_optional_str(&mut self) -> Option<(Symbol, ast::StrStyle, Option<ast::Name>)> {
         let ret = match self.token {
             token::Literal(token::Str_(s), suf) => (s, ast::StrStyle::Cooked, suf),
             token::Literal(token::StrRaw(s, n), suf) => (s, ast::StrStyle::Raw(n), suf),

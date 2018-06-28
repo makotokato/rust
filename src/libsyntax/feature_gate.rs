@@ -28,8 +28,8 @@ use self::AttributeGate::*;
 use rustc_target::spec::abi::Abi;
 use ast::{self, NodeId, PatKind, RangeEnd};
 use attr;
-use edition::{ALL_EDITIONS, Edition};
 use codemap::Spanned;
+use edition::{ALL_EDITIONS, Edition};
 use syntax_pos::{Span, DUMMY_SP};
 use errors::{DiagnosticBuilder, Handler, FatalError};
 use visit::{self, FnKind, Visitor};
@@ -309,7 +309,7 @@ declare_features! (
     // Declarative macros 2.0 (`macro`).
     (active, decl_macro, "1.17.0", Some(39412), None),
 
-    // Allows #[link(kind="static-nobundle"...]
+    // Allows #[link(kind="static-nobundle"...)]
     (active, static_nobundle, "1.16.0", Some(37403), None),
 
     // `extern "msp430-interrupt" fn()`
@@ -459,6 +459,9 @@ declare_features! (
     // Scoped attributes
     (active, tool_attributes, "1.25.0", Some(44690), None),
 
+    // allow irrefutable patterns in if-let and while-let statements (RFC 2086)
+    (active, irrefutable_let_patterns, "1.27.0", Some(44495), None),
+
     // Allows use of the :literal macro fragment specifier (RFC 1576)
     (active, macro_literal_matcher, "1.27.0", Some(35625), None),
 
@@ -468,12 +471,14 @@ declare_features! (
     // 'a: { break 'a; }
     (active, label_break_value, "1.28.0", Some(48594), None),
 
-
     // #[panic_implementation]
     (active, panic_implementation, "1.28.0", Some(44489), None),
 
     // #[doc(keyword = "...")]
     (active, doc_keyword, "1.28.0", Some(51315), None),
+
+    // Allows async and await syntax
+    (active, async_await, "1.28.0", Some(50547), None),
 );
 
 declare_features! (
@@ -1354,17 +1359,17 @@ pub const EXPLAIN_LITERAL_MATCHER: &'static str =
     ":literal fragment specifier is experimental and subject to change";
 
 pub const EXPLAIN_UNSIZED_TUPLE_COERCION: &'static str =
-    "Unsized tuple coercion is not stable enough for use and is subject to change";
+    "unsized tuple coercion is not stable enough for use and is subject to change";
 
 pub const EXPLAIN_MACRO_AT_MOST_ONCE_REP: &'static str =
-    "Using the `?` macro Kleene operator for \"at most one\" repetition is unstable";
+    "using the `?` macro Kleene operator for \"at most one\" repetition is unstable";
 
 pub const EXPLAIN_MACROS_IN_EXTERN: &'static str =
-    "Macro invocations in `extern {}` blocks are experimental.";
+    "macro invocations in `extern {}` blocks are experimental.";
 
 // mention proc-macros when enabled
 pub const EXPLAIN_PROC_MACROS_IN_EXTERN: &'static str =
-    "Macro and proc-macro invocations in `extern {}` blocks are experimental.";
+    "macro and proc-macro invocations in `extern {}` blocks are experimental.";
 
 struct PostExpansionVisitor<'a> {
     context: &'a Context<'a>,
@@ -1721,6 +1726,12 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
                                     "labels on blocks are unstable");
                 }
             }
+            ast::ExprKind::Closure(_, ast::IsAsync::Async(_), ..) => {
+                gate_feature_post!(&self, async_await, e.span, "async closures are unstable");
+            }
+            ast::ExprKind::Async(..) => {
+                gate_feature_post!(&self, async_await, e.span, "async blocks are unstable");
+            }
             _ => {}
         }
         visit::walk_expr(self, e);
@@ -1742,7 +1753,7 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
                                   pattern.span,
                                   "box pattern syntax is experimental");
             }
-            PatKind::Range(_, _, RangeEnd::Excluded) => {
+            PatKind::Range(_, _, Spanned { node: RangeEnd::Excluded, .. }) => {
                 gate_feature_post!(&self, exclusive_range_pattern, pattern.span,
                                    "exclusive range pattern syntax is experimental");
             }
@@ -1760,20 +1771,24 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
                 fn_decl: &'a ast::FnDecl,
                 span: Span,
                 _node_id: NodeId) {
-        // check for const fn declarations
-        if let FnKind::ItemFn(_, _, Spanned { node: ast::Constness::Const, .. }, _, _, _) =
-            fn_kind {
-            gate_feature_post!(&self, const_fn, span, "const fn is unstable");
-        }
-        // stability of const fn methods are covered in
-        // visit_trait_item and visit_impl_item below; this is
-        // because default methods don't pass through this
-        // point.
-
         match fn_kind {
-            FnKind::ItemFn(_, _, _, abi, _, _) |
-            FnKind::Method(_, &ast::MethodSig { abi, .. }, _, _) => {
-                self.check_abi(abi, span);
+            FnKind::ItemFn(_, header, _, _) => {
+                // check for const fn and async fn declarations
+                if header.asyncness.is_async() {
+                    gate_feature_post!(&self, async_await, span, "async fn is unstable");
+                }
+                if header.constness.node == ast::Constness::Const {
+                    gate_feature_post!(&self, const_fn, span, "const fn is unstable");
+                }
+                // stability of const fn methods are covered in
+                // visit_trait_item and visit_impl_item below; this is
+                // because default methods don't pass through this
+                // point.
+
+                self.check_abi(header.abi, span);
+            }
+            FnKind::Method(_, sig, _, _) => {
+                self.check_abi(sig.header.abi, span);
             }
             _ => {}
         }
@@ -1784,9 +1799,9 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
         match ti.node {
             ast::TraitItemKind::Method(ref sig, ref block) => {
                 if block.is_none() {
-                    self.check_abi(sig.abi, ti.span);
+                    self.check_abi(sig.header.abi, ti.span);
                 }
-                if sig.constness.node == ast::Constness::Const {
+                if sig.header.constness.node == ast::Constness::Const {
                     gate_feature_post!(&self, const_fn, ti.span, "const fn is unstable");
                 }
             }
@@ -1820,7 +1835,7 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
 
         match ii.node {
             ast::ImplItemKind::Method(ref sig, _) => {
-                if sig.constness.node == ast::Constness::Const {
+                if sig.header.constness.node == ast::Constness::Const {
                     gate_feature_post!(&self, const_fn, ii.span, "const fn is unstable");
                 }
             }

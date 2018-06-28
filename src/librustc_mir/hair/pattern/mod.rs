@@ -416,7 +416,6 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
             }
 
             PatKind::Slice(ref prefix, ref slice, ref suffix) => {
-                let ty = self.tables.node_id_to_type(pat.hir_id);
                 match ty.sty {
                     ty::TyRef(_, ty, _) =>
                         PatternKind::Deref {
@@ -427,11 +426,12 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
                                     pat.span, ty, prefix, slice, suffix))
                             },
                         },
-
                     ty::TySlice(..) |
                     ty::TyArray(..) =>
                         self.slice_or_array_pattern(pat.span, ty, prefix, slice, suffix),
-
+                    ty::TyError => { // Avoid ICE
+                        return Pattern { span: pat.span, ty, kind: Box::new(PatternKind::Wild) };
+                    }
                     ref sty =>
                         span_bug!(
                             pat.span,
@@ -441,7 +441,6 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
             }
 
             PatKind::Tuple(ref subpatterns, ddpos) => {
-                let ty = self.tables.node_id_to_type(pat.hir_id);
                 match ty.sty {
                     ty::TyTuple(ref tys) => {
                         let subpatterns =
@@ -455,7 +454,9 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
 
                         PatternKind::Leaf { subpatterns: subpatterns }
                     }
-
+                    ty::TyError => { // Avoid ICE (#50577)
+                        return Pattern { span: pat.span, ty, kind: Box::new(PatternKind::Wild) };
+                    }
                     ref sty => span_bug!(pat.span, "unexpected type for tuple pattern: {:?}", sty),
                 }
             }
@@ -464,6 +465,9 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
                 let var_ty = self.tables.node_id_to_type(pat.hir_id);
                 let region = match var_ty.sty {
                     ty::TyRef(r, _, _) => Some(r),
+                    ty::TyError => { // Avoid ICE
+                        return Pattern { span: pat.span, ty, kind: Box::new(PatternKind::Wild) };
+                    }
                     _ => None,
                 };
                 let bm = *self.tables.pat_binding_modes().get(pat.hir_id)
@@ -505,7 +509,12 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
                 let def = self.tables.qpath_def(qpath, pat.hir_id);
                 let adt_def = match ty.sty {
                     ty::TyAdt(adt_def, _) => adt_def,
-                    _ => span_bug!(pat.span, "tuple struct pattern not applied to an ADT"),
+                    ty::TyError => { // Avoid ICE (#50585)
+                        return Pattern { span: pat.span, ty, kind: Box::new(PatternKind::Wild) };
+                    }
+                    _ => span_bug!(pat.span,
+                                   "tuple struct pattern not applied to an ADT {:?}",
+                                   ty.sty),
                 };
                 let variant_def = adt_def.variant_of_def(def);
 
@@ -637,6 +646,9 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
                     let substs = match ty.sty {
                         ty::TyAdt(_, substs) |
                         ty::TyFnDef(_, substs) => substs,
+                        ty::TyError => {  // Avoid ICE (#50585)
+                            return PatternKind::Wild;
+                        }
                         _ => bug!("inappropriate type for def: {:?}", ty.sty),
                     };
                     PatternKind::Variant {
