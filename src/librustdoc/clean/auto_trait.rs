@@ -10,6 +10,7 @@
 
 use rustc::traits::auto_trait as auto;
 use rustc::ty::TypeFoldable;
+use rustc::hir;
 use std::fmt::Debug;
 
 use super::*;
@@ -65,9 +66,9 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
         let did = self.cx.tcx.hir.local_def_id(id);
 
         let def_ctor = match *item {
-            hir::ItemStruct(_, _) => Def::Struct,
-            hir::ItemUnion(_, _) => Def::Union,
-            hir::ItemEnum(_, _) => Def::Enum,
+            hir::ItemKind::Struct(_, _) => Def::Struct,
+            hir::ItemKind::Union(_, _) => Def::Union,
+            hir::ItemKind::Enum(_, _) => Def::Enum,
             _ => panic!("Unexpected type {:?} {:?}", item, id),
         };
 
@@ -200,10 +201,10 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
             let mut segments = path.segments.into_vec();
             let last = segments.pop().unwrap();
 
-            let real_name = name.map(|name| Symbol::intern(&name));
+            let real_name = name.map(|name| Ident::from_str(&name));
 
             segments.push(hir::PathSegment::new(
-                real_name.unwrap_or(last.name),
+                real_name.unwrap_or(last.ident),
                 self.generics_to_path_params(generics.clone()),
                 false,
             ));
@@ -216,7 +217,7 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
 
             let ty = hir::Ty {
                 id: ast::DUMMY_NODE_ID,
-                node: hir::Ty_::TyPath(hir::QPath::Resolved(None, P(new_path))),
+                node: hir::TyKind::Path(hir::QPath::Resolved(None, P(new_path))),
                 span: DUMMY_SP,
                 hir_id: hir::DUMMY_HIR_ID,
             };
@@ -251,9 +252,9 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
             match param.kind {
                 ty::GenericParamDefKind::Lifetime => {
                     let name = if param.name == "" {
-                        hir::ParamName::Plain(keywords::StaticLifetime.name())
+                        hir::ParamName::Plain(keywords::StaticLifetime.ident())
                     } else {
-                        hir::ParamName::Plain(param.name.as_symbol())
+                        hir::ParamName::Plain(ast::Ident::from_interned_str(param.name))
                     };
 
                     args.push(hir::GenericArg::Lifetime(hir::Lifetime {
@@ -279,13 +280,13 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
         debug!("ty_param_to_ty({:?}) {:?}", param, param.def_id);
         hir::Ty {
             id: ast::DUMMY_NODE_ID,
-            node: hir::Ty_::TyPath(hir::QPath::Resolved(
+            node: hir::TyKind::Path(hir::QPath::Resolved(
                 None,
                 P(hir::Path {
                     span: DUMMY_SP,
                     def: Def::TyParam(param.def_id),
                     segments: HirVec::from_vec(vec![
-                        hir::PathSegment::from_name(param.name.as_symbol())
+                        hir::PathSegment::from_ident(Ident::from_interned_str(param.name))
                     ]),
                 }),
             )),

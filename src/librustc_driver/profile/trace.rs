@@ -202,14 +202,13 @@ fn compute_counts_rec(counts: &mut HashMap<String,QueryMetric>, traces: &Vec<Rec
 
 pub fn write_counts(count_file: &mut File, counts: &mut HashMap<String,QueryMetric>) {
     use rustc::util::common::duration_to_secs_str;
-    use std::cmp::Ordering;
+    use std::cmp::Reverse;
 
     let mut data = vec![];
     for (ref cons, ref qm) in counts.iter() {
         data.push((cons.clone(), qm.count.clone(), qm.dur_total.clone(), qm.dur_self.clone()));
     };
-    data.sort_by(|&(_,_,_,self1),&(_,_,_,self2)|
-                 if self1 > self2 { Ordering::Less } else { Ordering::Greater } );
+    data.sort_by_key(|&k| Reverse(k.3));
     for (cons, count, dur_total, dur_self) in data {
         write!(count_file, "{}, {}, {}, {}\n",
                cons, count,
@@ -220,7 +219,8 @@ pub fn write_counts(count_file: &mut File, counts: &mut HashMap<String,QueryMetr
 }
 
 pub fn write_traces(html_file: &mut File, counts_file: &mut File, traces: &Vec<Rec>) {
-    let mut counts : HashMap<String,QueryMetric> = HashMap::new();
+    let capacity = traces.iter().fold(0, |acc, t| acc + 1 + t.extent.len());
+    let mut counts : HashMap<String, QueryMetric> = HashMap::with_capacity(capacity);
     compute_counts_rec(&mut counts, traces);
     write_counts(counts_file, &mut counts);
 

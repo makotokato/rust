@@ -60,13 +60,13 @@ use super::{InferCtxt, RegionVariableOrigin, SubregionOrigin, TypeTrace, ValuePa
 use super::region_constraints::GenericKind;
 use super::lexical_region_resolve::RegionResolutionError;
 
-use std::fmt;
+use std::{cmp, fmt};
 use hir;
 use hir::map as hir_map;
 use hir::def_id::DefId;
 use middle::region;
 use traits::{ObligationCause, ObligationCauseCode};
-use ty::{self, Region, Ty, TyCtxt, TypeFoldable, TypeVariants};
+use ty::{self, subst::Subst, Region, Ty, TyCtxt, TypeFoldable, TypeVariants};
 use ty::error::TypeError;
 use syntax::ast::DUMMY_NODE_ID;
 use syntax_pos::{Pos, Span};
@@ -102,12 +102,12 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                 let tag = match self.hir.find(scope.node_id(self, region_scope_tree)) {
                     Some(hir_map::NodeBlock(_)) => "block",
                     Some(hir_map::NodeExpr(expr)) => match expr.node {
-                        hir::ExprCall(..) => "call",
-                        hir::ExprMethodCall(..) => "method call",
-                        hir::ExprMatch(.., hir::MatchSource::IfLetDesugar { .. }) => "if let",
-                        hir::ExprMatch(.., hir::MatchSource::WhileLetDesugar) => "while let",
-                        hir::ExprMatch(.., hir::MatchSource::ForLoopDesugar) => "for",
-                        hir::ExprMatch(..) => "match",
+                        hir::ExprKind::Call(..) => "call",
+                        hir::ExprKind::MethodCall(..) => "method call",
+                        hir::ExprKind::Match(.., hir::MatchSource::IfLetDesugar { .. }) => "if let",
+                        hir::ExprKind::Match(.., hir::MatchSource::WhileLetDesugar) => "while let",
+                        hir::ExprKind::Match(.., hir::MatchSource::ForLoopDesugar) => "for",
+                        hir::ExprKind::Match(..) => "match",
                         _ => "expression",
                     },
                     Some(hir_map::NodeStmt(_)) => "statement",
@@ -189,40 +189,38 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         self,
         region: ty::Region<'tcx>,
     ) -> (String, Option<Span>) {
+        let cm = self.sess.codemap();
+
         let scope = region.free_region_binding_scope(self);
         let node = self.hir.as_local_node_id(scope).unwrap_or(DUMMY_NODE_ID);
-        let unknown;
         let tag = match self.hir.find(node) {
             Some(hir_map::NodeBlock(_)) | Some(hir_map::NodeExpr(_)) => "body",
             Some(hir_map::NodeItem(it)) => Self::item_scope_tag(&it),
             Some(hir_map::NodeTraitItem(it)) => Self::trait_item_scope_tag(&it),
             Some(hir_map::NodeImplItem(it)) => Self::impl_item_scope_tag(&it),
-
-            // this really should not happen, but it does:
-            // FIXME(#27942)
-            Some(_) => {
-                unknown = format!(
-                    "unexpected node ({}) for scope {:?}.  \
-                     Please report a bug.",
-                    self.hir.node_to_string(node),
-                    scope
-                );
-                &unknown
-            }
-            None => {
-                unknown = format!(
-                    "unknown node for scope {:?}.  \
-                     Please report a bug.",
-                    scope
-                );
-                &unknown
-            }
+            _ => unreachable!()
         };
         let (prefix, span) = match *region {
-            ty::ReEarlyBound(ref br) => (
-                format!("the lifetime {} as defined on", br.name),
-                self.sess.codemap().def_span(self.hir.span(node)),
-            ),
+            ty::ReEarlyBound(ref br) => {
+                let mut sp = cm.def_span(self.hir.span(node));
+                if let Some(param) = self.hir.get_generics(scope).and_then(|generics| {
+                    generics.get_named(&br.name)
+                }) {
+                    sp = param.span;
+                }
+                (format!("the lifetime {} as defined on", br.name), sp)
+            }
+            ty::ReFree(ty::FreeRegion {
+                bound_region: ty::BoundRegion::BrNamed(_, ref name), ..
+            }) => {
+                let mut sp = cm.def_span(self.hir.span(node));
+                if let Some(param) = self.hir.get_generics(scope).and_then(|generics| {
+                    generics.get_named(&name)
+                }) {
+                    sp = param.span;
+                }
+                (format!("the lifetime {} as defined on", name), sp)
+            }
             ty::ReFree(ref fr) => match fr.bound_region {
                 ty::BrAnon(idx) => (
                     format!("the anonymous lifetime #{} defined on", idx + 1),
@@ -234,7 +232,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                 ),
                 _ => (
                     format!("the lifetime {} as defined on", fr.bound_region),
-                    self.sess.codemap().def_span(self.hir.span(node)),
+                    cm.def_span(self.hir.span(node)),
                 ),
             },
             _ => bug!(),
@@ -261,12 +259,12 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
 
     fn item_scope_tag(item: &hir::Item) -> &'static str {
         match item.node {
-            hir::ItemImpl(..) => "impl",
-            hir::ItemStruct(..) => "struct",
-            hir::ItemUnion(..) => "union",
-            hir::ItemEnum(..) => "enum",
-            hir::ItemTrait(..) => "trait",
-            hir::ItemFn(..) => "function body",
+            hir::ItemKind::Impl(..) => "impl",
+            hir::ItemKind::Struct(..) => "struct",
+            hir::ItemKind::Union(..) => "union",
+            hir::ItemKind::Enum(..) => "enum",
+            hir::ItemKind::Trait(..) => "trait",
+            hir::ItemKind::Fn(..) => "function body",
             _ => "item",
         }
     }
@@ -281,7 +279,9 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     fn impl_item_scope_tag(item: &hir::ImplItem) -> &'static str {
         match item.node {
             hir::ImplItemKind::Method(..) => "method body",
-            hir::ImplItemKind::Const(..) | hir::ImplItemKind::Type(_) => "associated item",
+            hir::ImplItemKind::Const(..) |
+            hir::ImplItemKind::Existential(..) |
+            hir::ImplItemKind::Type(..) => "associated item",
         }
     }
 
@@ -500,7 +500,17 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                     } else {
                         err.span_label(arm_span, msg);
                     }
-                }
+                },
+                hir::MatchSource::TryDesugar => { // Issue #51632
+                    if let Ok(try_snippet) = self.tcx.sess.codemap().span_to_snippet(arm_span) {
+                        err.span_suggestion_with_applicability(
+                            arm_span,
+                            "try wrapping with a success variant",
+                            format!("Ok({})", try_snippet),
+                            Applicability::MachineApplicable
+                        );
+                    }
+                },
                 _ => {
                     let msg = "match arm with an incompatible type";
                     if self.tcx.sess.codemap().is_multiline(arm_span) {
@@ -644,6 +654,43 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         }
     }
 
+    /// For generic types with parameters with defaults, remove the parameters corresponding to
+    /// the defaults. This repeats a lot of the logic found in `PrintContext::parameterized`.
+    fn strip_generic_default_params(
+        &self,
+        def_id: DefId,
+        substs: &ty::subst::Substs<'tcx>
+    ) -> &'tcx ty::subst::Substs<'tcx> {
+        let generics = self.tcx.generics_of(def_id);
+        let mut num_supplied_defaults = 0;
+        let mut type_params = generics.params.iter().rev().filter_map(|param| match param.kind {
+            ty::GenericParamDefKind::Lifetime => None,
+            ty::GenericParamDefKind::Type { has_default, .. } => {
+                Some((param.def_id, has_default))
+            }
+        }).peekable();
+        let has_default = {
+            let has_default = type_params.peek().map(|(_, has_default)| has_default);
+            *has_default.unwrap_or(&false)
+        };
+        if has_default {
+            let types = substs.types().rev();
+            for ((def_id, has_default), actual) in type_params.zip(types) {
+                if !has_default {
+                    break;
+                }
+                if self.tcx.type_of(def_id).subst(self.tcx, substs) != actual {
+                    break;
+                }
+                num_supplied_defaults += 1;
+            }
+        }
+        let len = generics.params.len();
+        let mut generics = generics.clone();
+        generics.params.truncate(len - num_supplied_defaults);
+        substs.truncate_to(self.tcx, &generics)
+    }
+
     /// Compare two given types, eliding parts that are the same between them and highlighting
     /// relevant differences, and return two representation of those types for highlighted printing.
     fn cmp(&self, t1: Ty<'tcx>, t2: Ty<'tcx>) -> (DiagnosticStyledString, DiagnosticStyledString) {
@@ -685,6 +732,8 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
 
         match (&t1.sty, &t2.sty) {
             (&ty::TyAdt(def1, sub1), &ty::TyAdt(def2, sub2)) => {
+                let sub_no_defaults_1 = self.strip_generic_default_params(def1.did, sub1);
+                let sub_no_defaults_2 = self.strip_generic_default_params(def2.did, sub2);
                 let mut values = (DiagnosticStyledString::new(), DiagnosticStyledString::new());
                 let path1 = self.tcx.item_path_str(def1.did.clone());
                 let path2 = self.tcx.item_path_str(def2.did.clone());
@@ -700,8 +749,19 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                     values.0.push_normal(path1);
                     values.1.push_normal(path2);
 
+                    // Avoid printing out default generic parameters that are common to both
+                    // types.
+                    let len1 = sub_no_defaults_1.len();
+                    let len2 = sub_no_defaults_2.len();
+                    let common_len = cmp::min(len1, len2);
+                    let remainder1: Vec<_> = sub1.types().skip(common_len).collect();
+                    let remainder2: Vec<_> = sub2.types().skip(common_len).collect();
+                    let common_default_params =
+                        remainder1.iter().rev().zip(remainder2.iter().rev())
+                                               .filter(|(a, b)| a == b).count();
+                    let len = sub1.len() - common_default_params;
+
                     // Only draw `<...>` if there're lifetime/type arguments.
-                    let len = sub1.len();
                     if len > 0 {
                         values.0.push_normal("<");
                         values.1.push_normal("<");
@@ -746,7 +806,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                     //         ^ elided type as this type argument was the same in both sides
                     let type_arguments = sub1.types().zip(sub2.types());
                     let regions_len = sub1.regions().collect::<Vec<_>>().len();
-                    for (i, (ta1, ta2)) in type_arguments.enumerate() {
+                    for (i, (ta1, ta2)) in type_arguments.take(len).enumerate() {
                         let i = i + regions_len;
                         if ta1 == ta2 {
                             values.0.push_normal("_");
@@ -776,7 +836,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                         &mut values.0,
                         &mut values.1,
                         path1.clone(),
-                        sub1,
+                        sub_no_defaults_1,
                         path2.clone(),
                         &t2,
                     ).is_some()
@@ -788,8 +848,14 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                     //     Bar<Qux>
                     //     Foo<Bar<Qux>>
                     //         ------- this type argument is exactly the same as the other type
-                    if self.cmp_type_arg(&mut values.1, &mut values.0, path2, sub2, path1, &t1)
-                        .is_some()
+                    if self.cmp_type_arg(
+                        &mut values.1,
+                        &mut values.0,
+                        path2,
+                        sub_no_defaults_2,
+                        path1,
+                        &t1,
+                    ).is_some()
                     {
                         return values;
                     }
@@ -1020,6 +1086,23 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         bound_kind: GenericKind<'tcx>,
         sub: Region<'tcx>,
     ) {
+        self.construct_generic_bound_failure(region_scope_tree,
+                                             span,
+                                             origin,
+                                             bound_kind,
+                                             sub)
+            .emit()
+    }
+
+    pub fn construct_generic_bound_failure(
+        &self,
+        region_scope_tree: &region::ScopeTree,
+        span: Span,
+        origin: Option<SubregionOrigin<'tcx>>,
+        bound_kind: GenericKind<'tcx>,
+        sub: Region<'tcx>,
+    ) -> DiagnosticBuilder<'a>
+    {
         // Attempt to obtain the span of the parameter so we can
         // suggest adding an explicit lifetime bound to it.
         let type_param_span = match (self.in_progress_tables, bound_kind) {
@@ -1073,14 +1156,13 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             trait_item_def_id,
         }) = origin
         {
-            self.report_extra_impl_obligation(
+            return self.report_extra_impl_obligation(
                 span,
                 item_name,
                 impl_item_def_id,
                 trait_item_def_id,
                 &format!("`{}: {}`", bound_kind, sub),
-            ).emit();
-            return;
+            );
         }
 
         fn binding_suggestion<'tcx, S: fmt::Display>(
@@ -1163,7 +1245,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         if let Some(origin) = origin {
             self.note_region_origin(&mut err, &origin);
         }
-        err.emit();
+        err
     }
 
     fn report_sub_sup_conflict(
@@ -1255,7 +1337,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             infer::LateBoundRegion(_, br, infer::AssocTypeProjection(def_id)) => format!(
                 " for lifetime parameter {}in trait containing associated type `{}`",
                 br_string(br),
-                self.tcx.associated_item(def_id).name
+                self.tcx.associated_item(def_id).ident
             ),
             infer::EarlyBoundRegion(_, name) => format!(" for lifetime parameter `{}`", name),
             infer::BoundRegionInCoherence(name) => {
@@ -1294,7 +1376,12 @@ impl<'tcx> ObligationCause<'tcx> {
         match self.code {
             CompareImplMethodObligation { .. } => Error0308("method not compatible with trait"),
             MatchExpressionArm { source, .. } => Error0308(match source {
-                hir::MatchSource::IfLetDesugar { .. } => "`if let` arms have incompatible types",
+                hir::MatchSource::IfLetDesugar { .. } => {
+                    "`if let` arms have incompatible types"
+                },
+                hir::MatchSource::TryDesugar => {
+                    "try expression alternatives have incompatible types"
+                },
                 _ => "match arms have incompatible types",
             }),
             IfExpression => Error0308("if and else have incompatible types"),

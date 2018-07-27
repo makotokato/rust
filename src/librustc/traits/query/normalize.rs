@@ -14,8 +14,8 @@
 
 use infer::{InferCtxt, InferOk};
 use infer::at::At;
-use middle::const_val::ConstVal;
-use mir::interpret::GlobalId;
+use mir::interpret::{GlobalId, ConstValue};
+use rustc_data_structures::small_vec::SmallVec;
 use traits::{Obligation, ObligationCause, PredicateObligation, Reveal};
 use traits::project::Normalized;
 use ty::{self, Ty, TyCtxt};
@@ -148,8 +148,9 @@ impl<'cx, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for QueryNormalizer<'cx, 'gcx, 'tcx
 
                 let gcx = self.infcx.tcx.global_tcx();
 
-                let (c_data, orig_values) =
-                    self.infcx.canonicalize_query(&self.param_env.and(*data));
+                let mut orig_values = SmallVec::new();
+                let c_data =
+                    self.infcx.canonicalize_query(&self.param_env.and(*data), &mut orig_values);
                 debug!("QueryNormalizer: c_data = {:#?}", c_data);
                 debug!("QueryNormalizer: orig_values = {:#?}", orig_values);
                 match gcx.normalize_projection_ty(c_data) {
@@ -195,7 +196,7 @@ impl<'cx, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for QueryNormalizer<'cx, 'gcx, 'tcx
     }
 
     fn fold_const(&mut self, constant: &'tcx ty::Const<'tcx>) -> &'tcx ty::Const<'tcx> {
-        if let ConstVal::Unevaluated(def_id, substs) = constant.val {
+        if let ConstValue::Unevaluated(def_id, substs) = constant.val {
             let tcx = self.infcx.tcx.global_tcx();
             if let Some(param_env) = self.tcx().lift_to_global(&self.param_env) {
                 if substs.needs_infer() || substs.has_skol() {

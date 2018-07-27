@@ -62,10 +62,10 @@ pub struct State<'a> {
     literals: Peekable<vec::IntoIter<comments::Literal>>,
     cur_cmnt: usize,
     boxes: Vec<pp::Breaks>,
-    ann: &'a (PpAnn+'a),
+    ann: &'a (dyn PpAnn+'a),
 }
 
-fn rust_printer<'a>(writer: Box<Write+'a>, ann: &'a PpAnn) -> State<'a> {
+fn rust_printer<'a>(writer: Box<dyn Write+'a>, ann: &'a dyn PpAnn) -> State<'a> {
     State {
         s: pp::mk_printer(writer, DEFAULT_COLUMNS),
         cm: None,
@@ -88,9 +88,9 @@ pub fn print_crate<'a>(cm: &'a CodeMap,
                        sess: &ParseSess,
                        krate: &ast::Crate,
                        filename: FileName,
-                       input: &mut Read,
-                       out: Box<Write+'a>,
-                       ann: &'a PpAnn,
+                       input: &mut dyn Read,
+                       out: Box<dyn Write+'a>,
+                       ann: &'a dyn PpAnn,
                        is_expanded: bool) -> io::Result<()> {
     let mut s = State::new_from_input(cm, sess, filename, input, out, ann, is_expanded);
 
@@ -121,9 +121,9 @@ impl<'a> State<'a> {
     pub fn new_from_input(cm: &'a CodeMap,
                           sess: &ParseSess,
                           filename: FileName,
-                          input: &mut Read,
-                          out: Box<Write+'a>,
-                          ann: &'a PpAnn,
+                          input: &mut dyn Read,
+                          out: Box<dyn Write+'a>,
+                          ann: &'a dyn PpAnn,
                           is_expanded: bool) -> State<'a> {
         let (cmnts, lits) = comments::gather_comments_and_literals(sess, filename, input);
 
@@ -139,8 +139,8 @@ impl<'a> State<'a> {
     }
 
     pub fn new(cm: &'a CodeMap,
-               out: Box<Write+'a>,
-               ann: &'a PpAnn,
+               out: Box<dyn Write+'a>,
+               ann: &'a dyn PpAnn,
                comments: Option<Vec<comments::Comment>>,
                literals: Option<Vec<comments::Literal>>) -> State<'a> {
         State {
@@ -1078,7 +1078,7 @@ impl<'a> State<'a> {
                 let prefix = if syntax == ast::TraitObjectSyntax::Dyn { "dyn" } else { "" };
                 self.print_type_bounds(prefix, &bounds[..])?;
             }
-            ast::TyKind::ImplTrait(ref bounds) => {
+            ast::TyKind::ImplTrait(_, ref bounds) => {
                 self.print_type_bounds("impl", &bounds[..])?;
             }
             ast::TyKind::Array(ref ty, ref length) => {
@@ -1280,9 +1280,7 @@ impl<'a> State<'a> {
                 self.end()?;
             }
             ast::ItemKind::Ty(ref ty, ref generics) => {
-                self.ibox(INDENT_UNIT)?;
-                self.ibox(0)?;
-                self.word_nbsp(&visibility_qualified(&item.vis, "type"))?;
+                self.head(&visibility_qualified(&item.vis, "type"))?;
                 self.print_ident(item.ident)?;
                 self.print_generic_params(&generics.params)?;
                 self.end()?; // end the inner ibox
@@ -1291,6 +1289,18 @@ impl<'a> State<'a> {
                 self.s.space()?;
                 self.word_space("=")?;
                 self.print_type(ty)?;
+                self.s.word(";")?;
+                self.end()?; // end the outer ibox
+            }
+            ast::ItemKind::Existential(ref bounds, ref generics) => {
+                self.head(&visibility_qualified(&item.vis, "existential type"))?;
+                self.print_ident(item.ident)?;
+                self.print_generic_params(&generics.params)?;
+                self.end()?; // end the inner ibox
+
+                self.print_where_clause(&generics.where_clause)?;
+                self.s.space()?;
+                self.print_type_bounds(":", bounds)?;
                 self.s.word(";")?;
                 self.end()?; // end the outer ibox
             }
@@ -1501,8 +1511,8 @@ impl<'a> State<'a> {
         }
     }
 
-    pub fn print_defaultness(&mut self, defatulness: ast::Defaultness) -> io::Result<()> {
-        if let ast::Defaultness::Default = defatulness {
+    pub fn print_defaultness(&mut self, defaultness: ast::Defaultness) -> io::Result<()> {
+        if let ast::Defaultness::Default = defaultness {
             try!(self.word_nbsp("default"));
         }
         Ok(())
@@ -1649,6 +1659,10 @@ impl<'a> State<'a> {
             }
             ast::ImplItemKind::Type(ref ty) => {
                 self.print_associated_type(ii.ident, None, Some(ty))?;
+            }
+            ast::ImplItemKind::Existential(ref bounds) => {
+                self.word_space("existential")?;
+                self.print_associated_type(ii.ident, Some(bounds), None)?;
             }
             ast::ImplItemKind::Macro(ref mac) => {
                 self.print_mac(mac)?;
@@ -2641,7 +2655,9 @@ impl<'a> State<'a> {
                                    |s, p| s.print_pat(p))?;
                 if let Some(ref p) = *slice {
                     if !before.is_empty() { self.word_space(",")?; }
-                    if p.node != PatKind::Wild {
+                    if let PatKind::Wild = p.node {
+                        // Print nothing
+                    } else {
                         self.print_pat(p)?;
                     }
                     self.s.word("..")?;

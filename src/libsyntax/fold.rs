@@ -100,6 +100,10 @@ pub trait Folder : Sized {
         noop_fold_fn_decl(d, self)
     }
 
+    fn fold_asyncness(&mut self, a: IsAsync) -> IsAsync {
+        noop_fold_asyncness(a, self)
+    }
+
     fn fold_block(&mut self, b: P<Block>) -> P<Block> {
         noop_fold_block(b, self)
     }
@@ -396,8 +400,8 @@ pub fn noop_fold_ty<T: Folder>(t: P<Ty>, fld: &mut T) -> P<Ty> {
             TyKind::TraitObject(bounds, syntax) => {
                 TyKind::TraitObject(bounds.move_map(|b| fld.fold_param_bound(b)), syntax)
             }
-            TyKind::ImplTrait(bounds) => {
-                TyKind::ImplTrait(bounds.move_map(|b| fld.fold_param_bound(b)))
+            TyKind::ImplTrait(id, bounds) => {
+                TyKind::ImplTrait(fld.new_id(id), bounds.move_map(|b| fld.fold_param_bound(b)))
             }
             TyKind::Mac(mac) => {
                 TyKind::Mac(fld.fold_mac(mac))
@@ -669,6 +673,16 @@ pub fn noop_fold_interpolated<T: Folder>(nt: token::Nonterminal, fld: &mut T)
     }
 }
 
+pub fn noop_fold_asyncness<T: Folder>(asyncness: IsAsync, fld: &mut T) -> IsAsync {
+    match asyncness {
+        IsAsync::Async { closure_id, return_impl_trait_id } => IsAsync::Async {
+            closure_id: fld.new_id(closure_id),
+            return_impl_trait_id: fld.new_id(return_impl_trait_id),
+        },
+        IsAsync::NotAsync => IsAsync::NotAsync,
+    }
+}
+
 pub fn noop_fold_fn_decl<T: Folder>(decl: P<FnDecl>, fld: &mut T) -> P<FnDecl> {
     decl.map(|FnDecl {inputs, output, variadic}| FnDecl {
         inputs: inputs.move_map(|x| fld.fold_arg(x)),
@@ -898,6 +912,10 @@ pub fn noop_fold_item_kind<T: Folder>(i: ItemKind, folder: &mut T) -> ItemKind {
         ItemKind::Ty(t, generics) => {
             ItemKind::Ty(folder.fold_ty(t), folder.fold_generics(generics))
         }
+        ItemKind::Existential(bounds, generics) => ItemKind::Existential(
+            folder.fold_bounds(bounds),
+            folder.fold_generics(generics),
+        ),
         ItemKind::Enum(enum_definition, generics) => {
             let generics = folder.fold_generics(generics);
             let variants = enum_definition.variants.move_map(|x| folder.fold_variant(x));
@@ -988,6 +1006,9 @@ pub fn noop_fold_impl_item<T: Folder>(i: ImplItem, folder: &mut T)
                                folder.fold_block(body))
             }
             ast::ImplItemKind::Type(ty) => ast::ImplItemKind::Type(folder.fold_ty(ty)),
+            ast::ImplItemKind::Existential(bounds) => {
+                ast::ImplItemKind::Existential(folder.fold_bounds(bounds))
+            },
             ast::ImplItemKind::Macro(mac) => ast::ImplItemKind::Macro(folder.fold_mac(mac))
         },
         span: folder.new_span(i.span),
@@ -996,10 +1017,7 @@ pub fn noop_fold_impl_item<T: Folder>(i: ImplItem, folder: &mut T)
 }
 
 pub fn noop_fold_fn_header<T: Folder>(mut header: FnHeader, folder: &mut T) -> FnHeader {
-    header.asyncness = match header.asyncness {
-        IsAsync::Async(node_id) => IsAsync::Async(folder.new_id(node_id)),
-        IsAsync::NotAsync => IsAsync::NotAsync,
-    };
+    header.asyncness = folder.fold_asyncness(header.asyncness);
     header
 }
 
@@ -1249,12 +1267,8 @@ pub fn noop_fold_expr<T: Folder>(Expr {id, node, span, attrs}: Expr, folder: &mu
                           arms.move_map(|x| folder.fold_arm(x)))
             }
             ExprKind::Closure(capture_clause, asyncness, movability, decl, body, span) => {
-                let asyncness = match asyncness {
-                    IsAsync::Async(node_id) => IsAsync::Async(folder.new_id(node_id)),
-                    IsAsync::NotAsync => IsAsync::NotAsync,
-                };
                 ExprKind::Closure(capture_clause,
-                                  asyncness,
+                                  folder.fold_asyncness(asyncness),
                                   movability,
                                   folder.fold_fn_decl(decl),
                                   folder.fold_expr(body),
@@ -1265,7 +1279,11 @@ pub fn noop_fold_expr<T: Folder>(Expr {id, node, span, attrs}: Expr, folder: &mu
                                 opt_label.map(|label| folder.fold_label(label)))
             }
             ExprKind::Async(capture_clause, node_id, body) => {
-                ExprKind::Async(capture_clause, folder.new_id(node_id), folder.fold_block(body))
+                ExprKind::Async(
+                    capture_clause,
+                    folder.new_id(node_id),
+                    folder.fold_block(body),
+                )
             }
             ExprKind::Assign(el, er) => {
                 ExprKind::Assign(folder.fold_expr(el), folder.fold_expr(er))

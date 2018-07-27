@@ -212,6 +212,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             data @ DefPathData::Trait(..) |
             data @ DefPathData::AssocTypeInTrait(..) |
             data @ DefPathData::AssocTypeInImpl(..) |
+            data @ DefPathData::AssocExistentialInImpl(..) |
             data @ DefPathData::ValueNs(..) |
             data @ DefPathData::Module(..) |
             data @ DefPathData::TypeParam(..) |
@@ -221,8 +222,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             data @ DefPathData::AnonConst |
             data @ DefPathData::MacroDef(..) |
             data @ DefPathData::ClosureExpr |
-            data @ DefPathData::ExistentialImplTrait |
-            data @ DefPathData::UniversalImplTrait |
+            data @ DefPathData::ImplTrait |
             data @ DefPathData::GlobalMetaData(..) => {
                 let parent_def_id = self.parent_def_id(def_id).unwrap();
                 self.push_item_path(buffer, parent_def_id);

@@ -16,6 +16,7 @@
 use build::{BlockAnd, BlockAndExtension, Builder};
 use build::{GuardFrame, GuardFrameLocal, LocalsForNode};
 use build::ForGuard::{self, OutsideGuard, RefWithinGuard, ValWithinGuard};
+use build::scope::{CachedBlock, DropKind};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::bitvec::BitVector;
 use rustc::ty::{self, Ty};
@@ -44,6 +45,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                       arms: Vec<Arm<'tcx>>)
                       -> BlockAnd<()> {
         let tcx = self.hir.tcx();
+        let discriminant_span = discriminant.span();
         let discriminant_place = unpack!(block = self.as_place(block, discriminant));
 
         // Matching on a `discriminant_place` with an uninhabited type doesn't
@@ -96,7 +98,8 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             let scope = self.declare_bindings(None, body.span,
                                               LintLevel::Inherited,
                                               &arm.patterns[0],
-                                              ArmHasGuard(arm.guard.is_some()));
+                                              ArmHasGuard(arm.guard.is_some()),
+                                              Some((Some(&discriminant_place), discriminant_span)));
             (body, scope.unwrap_or(self.source_scope))
         }).collect();
 
@@ -254,7 +257,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             }
             _ => {
                 let place = unpack!(block = self.as_place(block, initializer));
-                self.place_into_pattern(block, irrefutable_pat, &place)
+                self.place_into_pattern(block, irrefutable_pat, &place, true)
             }
         }
     }
@@ -262,7 +265,8 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     pub fn place_into_pattern(&mut self,
                                mut block: BasicBlock,
                                irrefutable_pat: Pattern<'tcx>,
-                               initializer: &Place<'tcx>)
+                               initializer: &Place<'tcx>,
+                               set_match_place: bool)
                                -> BlockAnd<()> {
         // create a dummy candidate
         let mut candidate = Candidate {
@@ -288,6 +292,25 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                       candidate.match_pairs);
         }
 
+        // for matches and function arguments, the place that is being matched
+        // can be set when creating the variables. But the place for
+        // let PATTERN = ... might not even exist until we do the assignment.
+        // so we set it here instead
+        if set_match_place {
+            for binding in &candidate.bindings {
+                let local = self.var_local_id(binding.var_id, OutsideGuard);
+
+                if let Some(ClearCrossCrate::Set(BindingForm::Var(
+                    VarBindingForm {opt_match_place: Some((ref mut match_place, _)), .. }
+                ))) = self.local_decls[local].is_user_variable
+                {
+                    *match_place = Some(initializer.clone());
+                } else {
+                    bug!("Let binding to non-user variable.")
+                }
+            }
+        }
+
         // now apply the bindings, which will also declare the variables
         self.bind_matched_candidate_for_arm_body(block, &candidate.bindings);
 
@@ -302,7 +325,8 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                             scope_span: Span,
                             lint_level: LintLevel,
                             pattern: &Pattern<'tcx>,
-                            has_guard: ArmHasGuard)
+                            has_guard: ArmHasGuard,
+                            opt_match_place: Option<(Option<&Place<'tcx>>, Span)>)
                             -> Option<SourceScope> {
         assert!(!(visibility_scope.is_some() && lint_level.is_explicit()),
                 "can't have both a visibility and a lint scope at the same time");
@@ -326,7 +350,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             };
             let visibility_scope = visibility_scope.unwrap();
             this.declare_binding(source_info, visibility_scope, mutability, name, mode, var,
-                                 ty, has_guard);
+                                 ty, has_guard, opt_match_place.map(|(x, y)| (x.cloned(), y)));
         });
         visibility_scope
     }
@@ -344,7 +368,15 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             source_info,
             kind: StatementKind::StorageLive(local_id)
         });
-        Place::Local(local_id)
+        let place = Place::Local(local_id);
+        let var_ty = self.local_decls[local_id].ty;
+        let hir_id = self.hir.tcx().hir.node_to_hir_id(var);
+        let region_scope = self.hir.region_scope_tree.var_scope(hir_id.local_id);
+        self.schedule_drop(
+            span, region_scope, &place, var_ty,
+            DropKind::Storage,
+        );
+        place
     }
 
     pub fn schedule_drop_for_binding(&mut self,
@@ -355,7 +387,12 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
         let var_ty = self.local_decls[local_id].ty;
         let hir_id = self.hir.tcx().hir.node_to_hir_id(var);
         let region_scope = self.hir.region_scope_tree.var_scope(hir_id.local_id);
-        self.schedule_drop(span, region_scope, &Place::Local(local_id), var_ty);
+        self.schedule_drop(
+            span, region_scope, &Place::Local(local_id), var_ty,
+            DropKind::Value {
+                cached_block: CachedBlock::default(),
+            },
+        );
     }
 
     pub fn visit_bindings<F>(&mut self, pattern: &Pattern<'tcx>, f: &mut F)
@@ -450,7 +487,7 @@ enum TestKind<'tcx> {
     // test the branches of enum
     Switch {
         adt_def: &'tcx ty::AdtDef,
-        variants: BitVector,
+        variants: BitVector<usize>,
     },
 
     // test the branches of enum
@@ -468,8 +505,8 @@ enum TestKind<'tcx> {
 
     // test whether the value falls within an inclusive or exclusive range
     Range {
-        lo: Literal<'tcx>,
-        hi: Literal<'tcx>,
+        lo: &'tcx ty::Const<'tcx>,
+        hi: &'tcx ty::Const<'tcx>,
         ty: Ty<'tcx>,
         end: hir::RangeEnd,
     },
@@ -1121,7 +1158,8 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                        mode: BindingMode,
                        var_id: NodeId,
                        var_ty: Ty<'tcx>,
-                       has_guard: ArmHasGuard)
+                       has_guard: ArmHasGuard,
+                       opt_match_place: Option<(Option<Place<'tcx>>, Span)>)
     {
         debug!("declare_binding(var_id={:?}, name={:?}, mode={:?}, var_ty={:?}, \
                 visibility_scope={:?}, source_info={:?})",
@@ -1146,6 +1184,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 // idents in pat; but complex w/ unclear UI payoff.
                 // Instead, just abandon providing diagnostic info.
                 opt_ty_info: None,
+                opt_match_place,
             }))),
         };
         let for_arm_body = self.local_decls.push(local.clone());
@@ -1159,7 +1198,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 visibility_scope,
                 // FIXME: should these secretly injected ref_for_guard's be marked as `internal`?
                 internal: false,
-                is_user_variable: None,
+                is_user_variable: Some(ClearCrossCrate::Set(BindingForm::RefForGuard)),
             });
             LocalsForNode::Three { val_for_guard, ref_for_guard, for_arm_body }
         } else {

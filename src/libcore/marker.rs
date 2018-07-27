@@ -92,10 +92,10 @@ impl<T: ?Sized> !Send for *mut T { }
 #[stable(feature = "rust1", since = "1.0.0")]
 #[lang = "sized"]
 #[rustc_on_unimplemented(
-    message="the size for value values of type `{Self}` cannot be known at compilation time",
+    message="the size for values of type `{Self}` cannot be known at compilation time",
     label="doesn't have a size known at compile-time",
     note="to learn more, visit <https://doc.rust-lang.org/book/second-edition/\
-          ch19-04-advanced-types.html#dynamically-sized-types--sized>",
+          ch19-04-advanced-types.html#dynamically-sized-types-and-sized>",
 )]
 #[fundamental] // for Default, for example, which requires that `[T]: !Default` be evaluatable
 pub trait Sized {
@@ -624,6 +624,12 @@ pub struct Pinned;
 
 #[unstable(feature = "pin", issue = "49150")]
 impl !Unpin for Pinned {}
+
+#[unstable(feature = "pin", issue = "49150")]
+impl<'a, T: ?Sized + 'a> Unpin for &'a T {}
+
+#[unstable(feature = "pin", issue = "49150")]
+impl<'a, T: ?Sized + 'a> Unpin for &'a mut T {}
 
 /// Implementations of `Copy` for primitive types.
 ///

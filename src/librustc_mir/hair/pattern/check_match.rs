@@ -98,7 +98,7 @@ impl<'a, 'tcx> Visitor<'tcx> for MatchVisitor<'a, 'tcx> {
         intravisit::walk_expr(self, ex);
 
         match ex.node {
-            hir::ExprMatch(ref scrut, ref arms, source) => {
+            hir::ExprKind::Match(ref scrut, ref arms, source) => {
                 self.check_match(scrut, arms, source);
             }
             _ => {}
@@ -140,13 +140,13 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
                 }
                 PatternError::FloatBug => {
                     // FIXME(#31407) this is only necessary because float parsing is buggy
-                    ::rustc::middle::const_val::struct_error(
+                    ::rustc::mir::interpret::struct_error(
                         self.tcx.at(pat_span),
                         "could not evaluate float literal (see issue #31407)",
                     ).emit();
                 }
                 PatternError::NonConstPath(span) => {
-                    ::rustc::middle::const_val::struct_error(
+                    ::rustc::mir::interpret::struct_error(
                         self.tcx.at(span),
                         "runtime values cannot be referenced in patterns",
                     ).emit();
@@ -308,34 +308,33 @@ impl<'a, 'tcx> MatchVisitor<'a, 'tcx> {
 
 fn check_for_bindings_named_the_same_as_variants(cx: &MatchVisitor, pat: &Pat) {
     pat.walk(|p| {
-        if let PatKind::Binding(_, _, name, None) = p.node {
-            let bm = *cx.tables
-                        .pat_binding_modes()
-                        .get(p.hir_id)
-                        .expect("missing binding mode");
-
-            if bm != ty::BindByValue(hir::MutImmutable) {
-                // Nothing to check.
-                return true;
-            }
-            let pat_ty = cx.tables.pat_ty(p);
-            if let ty::TyAdt(edef, _) = pat_ty.sty {
-                if edef.is_enum() && edef.variants.iter().any(|variant| {
-                    variant.name == name.node && variant.ctor_kind == CtorKind::Const
-                }) {
-                    let ty_path = cx.tcx.item_path_str(edef.did);
-                    let mut err = struct_span_warn!(cx.tcx.sess, p.span, E0170,
-                        "pattern binding `{}` is named the same as one \
-                         of the variants of the type `{}`",
-                        name.node, ty_path);
-                    err.span_suggestion_with_applicability(
-                        p.span,
-                        "to match on the variant, qualify the path",
-                        format!("{}::{}", ty_path, name.node),
-                        Applicability::MachineApplicable
-                    );
-                    err.emit();
+        if let PatKind::Binding(_, _, ident, None) = p.node {
+            if let Some(&bm) = cx.tables.pat_binding_modes().get(p.hir_id) {
+                if bm != ty::BindByValue(hir::MutImmutable) {
+                    // Nothing to check.
+                    return true;
                 }
+                let pat_ty = cx.tables.pat_ty(p);
+                if let ty::TyAdt(edef, _) = pat_ty.sty {
+                    if edef.is_enum() && edef.variants.iter().any(|variant| {
+                        variant.name == ident.name && variant.ctor_kind == CtorKind::Const
+                    }) {
+                        let ty_path = cx.tcx.item_path_str(edef.did);
+                        let mut err = struct_span_warn!(cx.tcx.sess, p.span, E0170,
+                            "pattern binding `{}` is named the same as one \
+                            of the variants of the type `{}`",
+                            ident, ty_path);
+                        err.span_suggestion_with_applicability(
+                            p.span,
+                            "to match on the variant, qualify the path",
+                            format!("{}::{}", ty_path, ident),
+                            Applicability::MachineApplicable
+                        );
+                        err.emit();
+                    }
+                }
+            } else {
+                cx.tcx.sess.delay_span_bug(p.span, "missing binding mode");
             }
         }
         true
@@ -517,12 +516,12 @@ fn check_legality_of_move_bindings(cx: &MatchVisitor,
     let mut by_ref_span = None;
     for pat in pats {
         pat.each_binding(|_, hir_id, span, _path| {
-            let bm = *cx.tables
-                        .pat_binding_modes()
-                        .get(hir_id)
-                        .expect("missing binding mode");
-            if let ty::BindByReference(..) = bm {
-                by_ref_span = Some(span);
+            if let Some(&bm) = cx.tables.pat_binding_modes().get(hir_id) {
+                if let ty::BindByReference(..) = bm {
+                    by_ref_span = Some(span);
+                }
+            } else {
+                cx.tcx.sess.delay_span_bug(pat.span, "missing binding mode");
             }
         })
     }
@@ -553,18 +552,18 @@ fn check_legality_of_move_bindings(cx: &MatchVisitor,
     for pat in pats {
         pat.walk(|p| {
             if let PatKind::Binding(_, _, _, ref sub) = p.node {
-                let bm = *cx.tables
-                            .pat_binding_modes()
-                            .get(p.hir_id)
-                            .expect("missing binding mode");
-                match bm {
-                    ty::BindByValue(..) => {
-                        let pat_ty = cx.tables.node_id_to_type(p.hir_id);
-                        if pat_ty.moves_by_default(cx.tcx, cx.param_env, pat.span) {
-                            check_move(p, sub.as_ref().map(|p| &**p));
+                if let Some(&bm) = cx.tables.pat_binding_modes().get(p.hir_id) {
+                    match bm {
+                        ty::BindByValue(..) => {
+                            let pat_ty = cx.tables.node_id_to_type(p.hir_id);
+                            if pat_ty.moves_by_default(cx.tcx, cx.param_env, pat.span) {
+                                check_move(p, sub.as_ref().map(|p| &**p));
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
+                } else {
+                    cx.tcx.sess.delay_span_bug(pat.span, "missing binding mode");
                 }
             }
             true

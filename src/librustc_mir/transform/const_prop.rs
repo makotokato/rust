@@ -13,11 +13,11 @@
 
 
 use rustc::hir::def::Def;
-use rustc::mir::{Constant, Literal, Location, Place, Mir, Operand, Rvalue, Local};
+use rustc::mir::{Constant, Location, Place, Mir, Operand, Rvalue, Local};
 use rustc::mir::{NullOp, StatementKind, Statement, BasicBlock, LocalKind};
 use rustc::mir::{TerminatorKind, ClearCrossCrate, SourceInfo, BinOp, ProjectionElem};
 use rustc::mir::visit::{Visitor, PlaceContext};
-use rustc::middle::const_val::{ConstVal, ConstEvalErr, ErrKind};
+use rustc::mir::interpret::{ConstEvalErr, EvalErrorKind};
 use rustc::ty::{TyCtxt, self, Instance};
 use rustc::mir::interpret::{Value, Scalar, GlobalId, EvalResult};
 use interpret::EvalContext;
@@ -45,8 +45,11 @@ impl MirPass for ConstProp {
             return;
         }
         match tcx.describe_def(source.def_id) {
-            // skip statics because they'll be evaluated by miri anyway
+            // skip statics/consts because they'll be evaluated by miri anyway
+            Some(Def::Const(..)) |
             Some(Def::Static(..)) => return,
+            // we still run on associated constants, because they might not get evaluated
+            // within the current crate
             _ => {},
         }
         trace!("ConstProp starting for {:?}", source.def_id);
@@ -141,17 +144,106 @@ impl<'b, 'a, 'tcx:'b> ConstPropagator<'b, 'a, 'tcx> {
         };
         let r = match f(self) {
             Ok(val) => Some(val),
-            Err(err) => {
-                let (frames, span) = self.ecx.generate_stacktrace(None);
-                let err = ConstEvalErr {
-                    span,
-                    kind: ErrKind::Miri(err, frames).into(),
-                };
-                err.report_as_lint(
-                    self.ecx.tcx,
-                    "this expression will panic at runtime",
-                    lint_root,
-                );
+            Err(error) => {
+                let (stacktrace, span) = self.ecx.generate_stacktrace(None);
+                let diagnostic = ConstEvalErr { span, error, stacktrace };
+                use rustc::mir::interpret::EvalErrorKind::*;
+                match diagnostic.error.kind {
+                    // don't report these, they make no sense in a const prop context
+                    | MachineError(_)
+                    // at runtime these transformations might make sense
+                    // FIXME: figure out the rules and start linting
+                    | FunctionPointerTyMismatch(..)
+                    // fine at runtime, might be a register address or sth
+                    | ReadBytesAsPointer
+                    // fine at runtime
+                    | ReadForeignStatic
+                    | Unimplemented(_)
+                    // don't report const evaluator limits
+                    | StackFrameLimitReached
+                    | NoMirFor(..)
+                    | InlineAsm
+                    => {},
+
+                    | InvalidMemoryAccess
+                    | DanglingPointerDeref
+                    | DoubleFree
+                    | InvalidFunctionPointer
+                    | InvalidBool
+                    | InvalidDiscriminant
+                    | PointerOutOfBounds { .. }
+                    | InvalidNullPointerUsage
+                    | MemoryLockViolation { .. }
+                    | MemoryAcquireConflict { .. }
+                    | ValidationFailure(..)
+                    | InvalidMemoryLockRelease { .. }
+                    | DeallocatedLockedMemory { .. }
+                    | InvalidPointerMath
+                    | ReadUndefBytes
+                    | DeadLocal
+                    | InvalidBoolOp(_)
+                    | DerefFunctionPointer
+                    | ExecuteMemory
+                    | Intrinsic(..)
+                    | InvalidChar(..)
+                    | AbiViolation(_)
+                    | AlignmentCheckFailed{..}
+                    | CalledClosureAsFunction
+                    | VtableForArgumentlessMethod
+                    | ModifiedConstantMemory
+                    | AssumptionNotHeld
+                    // FIXME: should probably be removed and turned into a bug! call
+                    | TypeNotPrimitive(_)
+                    | ReallocatedWrongMemoryKind(_, _)
+                    | DeallocatedWrongMemoryKind(_, _)
+                    | ReallocateNonBasePtr
+                    | DeallocateNonBasePtr
+                    | IncorrectAllocationInformation(..)
+                    | UnterminatedCString(_)
+                    | HeapAllocZeroBytes
+                    | HeapAllocNonPowerOfTwoAlignment(_)
+                    | Unreachable
+                    | ReadFromReturnPointer
+                    | GeneratorResumedAfterReturn
+                    | GeneratorResumedAfterPanic
+                    | ReferencedConstant(_)
+                    | InfiniteLoop
+                    => {
+                        // FIXME: report UB here
+                    },
+
+                    | OutOfTls
+                    | TlsOutOfBounds
+                    | PathNotFound(_)
+                    => bug!("these should not be in rustc, but in miri's machine errors"),
+
+                    | Layout(_)
+                    | UnimplementedTraitSelection
+                    | TypeckError
+                    | TooGeneric
+                    | CheckMatchError
+                    // these are just noise
+                    => {},
+
+                    // non deterministic
+                    | ReadPointerAsBytes
+                    // FIXME: implement
+                    => {},
+
+                    | Panic
+                    | BoundsCheck{..}
+                    | Overflow(_)
+                    | OverflowNeg
+                    | DivisionByZero
+                    | RemainderByZero
+                    => {
+                        diagnostic.report_as_lint(
+                            self.ecx.tcx,
+                            "this expression will panic at runtime",
+                            lint_root,
+                        );
+                    }
+                }
                 None
             },
         };
@@ -159,77 +251,27 @@ impl<'b, 'a, 'tcx:'b> ConstPropagator<'b, 'a, 'tcx> {
         r
     }
 
-    fn const_eval(&mut self, cid: GlobalId<'tcx>, source_info: SourceInfo) -> Option<Const<'tcx>> {
-        let value = match self.tcx.const_eval(self.param_env.and(cid)) {
-            Ok(val) => val,
-            Err(err) => {
-                err.report_as_error(
-                    self.tcx.at(err.span),
-                    "constant evaluation error",
-                );
-                return None;
-            },
-        };
-        let val = match value.val {
-            ConstVal::Value(v) => {
-                self.use_ecx(source_info, |this| this.ecx.const_value_to_value(v, value.ty))?
-            },
-            _ => bug!("eval produced: {:?}", value),
-        };
-        let val = (val, value.ty, source_info.span);
-        trace!("evaluated {:?} to {:?}", cid, val);
-        Some(val)
-    }
-
     fn eval_constant(
         &mut self,
         c: &Constant<'tcx>,
         source_info: SourceInfo,
     ) -> Option<Const<'tcx>> {
-        match c.literal {
-            Literal::Value { value } => match value.val {
-                ConstVal::Value(v) => {
-                    let v = self.use_ecx(source_info, |this| {
-                        this.ecx.const_value_to_value(v, value.ty)
-                    })?;
-                    Some((v, value.ty, c.span))
-                },
-                ConstVal::Unevaluated(did, substs) => {
-                    let instance = Instance::resolve(
-                        self.tcx,
-                        self.param_env,
-                        did,
-                        substs,
-                    )?;
-                    let cid = GlobalId {
-                        instance,
-                        promoted: None,
-                    };
-                    self.const_eval(cid, source_info)
-                },
-            },
-            // evaluate the promoted and replace the constant with the evaluated result
-            Literal::Promoted { index } => {
-                let generics = self.tcx.generics_of(self.source.def_id);
-                if generics.requires_monomorphization(self.tcx) {
-                    // FIXME: can't handle code with generics
-                    return None;
-                }
-                let substs = Substs::identity_for_item(self.tcx, self.source.def_id);
-                let instance = Instance::new(self.source.def_id, substs);
-                let cid = GlobalId {
-                    instance,
-                    promoted: Some(index),
+        self.ecx.tcx.span = source_info.span;
+        match self.ecx.const_to_value(c.literal.val) {
+            Ok(val) => Some((val, c.literal.ty, c.span)),
+            Err(error) => {
+                let (stacktrace, span) = self.ecx.generate_stacktrace(None);
+                let err = ConstEvalErr {
+                    span,
+                    error,
+                    stacktrace,
                 };
-                // cannot use `const_eval` here, because that would require having the MIR
-                // for the current function available, but we're producing said MIR right now
-                let (value, _, ty) = self.use_ecx(source_info, |this| {
-                    eval_promoted(&mut this.ecx, cid, this.mir, this.param_env)
-                })?;
-                let val = (value, ty, c.span);
-                trace!("evaluated {:?} to {:?}", c, val);
-                Some(val)
-            }
+                err.report_as_error(
+                    self.tcx.at(source_info.span),
+                    "could not evaluate constant",
+                );
+                None
+            },
         }
     }
 
@@ -246,6 +288,27 @@ impl<'b, 'a, 'tcx:'b> ConstPropagator<'b, 'a, 'tcx> {
                     Some((valty.value, valty.ty, span))
                 },
                 _ => None,
+            },
+            Place::Promoted(ref promoted) => {
+                let generics = self.tcx.generics_of(self.source.def_id);
+                if generics.requires_monomorphization(self.tcx) {
+                    // FIXME: can't handle code with generics
+                    return None;
+                }
+                let substs = Substs::identity_for_item(self.tcx, self.source.def_id);
+                let instance = Instance::new(self.source.def_id, substs);
+                let cid = GlobalId {
+                    instance,
+                    promoted: Some(promoted.0),
+                };
+                // cannot use `const_eval` here, because that would require having the MIR
+                // for the current function available, but we're producing said MIR right now
+                let (value, _, ty) = self.use_ecx(source_info, |this| {
+                    eval_promoted(&mut this.ecx, cid, this.mir, this.param_env)
+                })?;
+                let val = (value, ty, source_info.span);
+                trace!("evaluated promoted {:?} to {:?}", promoted, val);
+                Some(val)
             },
             _ => None,
         }
@@ -277,10 +340,25 @@ impl<'b, 'a, 'tcx:'b> ConstPropagator<'b, 'a, 'tcx> {
             },
             Rvalue::Repeat(..) |
             Rvalue::Ref(..) |
-            Rvalue::Cast(..) |
             Rvalue::Aggregate(..) |
             Rvalue::NullaryOp(NullOp::Box, _) |
             Rvalue::Discriminant(..) => None,
+
+            Rvalue::Cast(kind, ref operand, _) => {
+                let (value, ty, span) = self.eval_operand(operand, source_info)?;
+                self.use_ecx(source_info, |this| {
+                    let dest_ptr = this.ecx.alloc_ptr(place_ty)?;
+                    let place_align = this.ecx.layout_of(place_ty)?.align;
+                    let dest = ::interpret::Place::from_ptr(dest_ptr, place_align);
+                    this.ecx.cast(ValTy { value, ty }, kind, place_ty, dest)?;
+                    Ok((
+                        Value::ByRef(dest_ptr.into(), place_align),
+                        place_ty,
+                        span,
+                    ))
+                })
+            }
+
             // FIXME(oli-obk): evaluate static/constant slice lengths
             Rvalue::Len(_) => None,
             Rvalue::NullaryOp(NullOp::SizeOf, ty) => {
@@ -374,7 +452,6 @@ impl<'b, 'a, 'tcx:'b> ConstPropagator<'b, 'a, 'tcx> {
                     )
                 } else {
                     if overflow {
-                        use rustc::mir::interpret::EvalErrorKind;
                         let err = EvalErrorKind::Overflow(op).into();
                         let _: Option<()> = self.use_ecx(source_info, |_| Err(err));
                         return None;

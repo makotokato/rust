@@ -72,7 +72,7 @@ struct TestCtxt<'a> {
 // Traverse the crate, collecting all the test functions, eliding any
 // existing main functions, and synthesizing a main test harness
 pub fn modify_for_testing(sess: &ParseSess,
-                          resolver: &mut Resolver,
+                          resolver: &mut dyn Resolver,
                           should_test: bool,
                           krate: ast::Crate,
                           span_diagnostic: &errors::Handler,
@@ -278,7 +278,7 @@ fn mk_reexport_mod(cx: &mut TestCtxt,
 }
 
 fn generate_test_harness(sess: &ParseSess,
-                         resolver: &mut Resolver,
+                         resolver: &mut dyn Resolver,
                          reexport_test_harness_main: Option<Symbol>,
                          krate: ast::Crate,
                          sd: &errors::Handler,
@@ -329,7 +329,6 @@ fn ignored_span(cx: &TestCtxt, sp: Span) -> Span {
     sp.with_ctxt(cx.ctxt)
 }
 
-#[derive(PartialEq)]
 enum HasTestSignature {
     Yes,
     No(BadTestSignature),
@@ -354,7 +353,7 @@ fn is_test_fn(cx: &TestCtxt, i: &ast::Item) -> bool {
                 // type implements the `Termination` trait as `libtest` enforces that.
                 let has_output = match decl.output {
                     ast::FunctionRetTy::Default(..) => false,
-                    ast::FunctionRetTy::Ty(ref t) if t.node == ast::TyKind::Tup(vec![]) => false,
+                    ast::FunctionRetTy::Ty(ref t) if t.node.is_unit() => false,
                     _ => true
                 };
 

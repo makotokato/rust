@@ -38,10 +38,12 @@ use hir::def_id::{CrateNum, LOCAL_CRATE};
 use hir::intravisit;
 use hir;
 use lint::builtin::BuiltinLintDiagnostics;
+use lint::builtin::parser::QUESTION_MARK_MACRO_SEP;
 use session::{Session, DiagnosticMessageId};
-use std::hash;
+use std::{hash, ptr};
 use syntax::ast;
-use syntax::codemap::MultiSpan;
+use syntax::codemap::{MultiSpan, ExpnFormat};
+use syntax::early_buffered_lints::BufferedEarlyLintId;
 use syntax::edition::Edition;
 use syntax::symbol::Symbol;
 use syntax::visit as ast_visit;
@@ -80,9 +82,19 @@ pub struct Lint {
     /// Starting at the given edition, default to the given lint level. If this is `None`, then use
     /// `default_level`.
     pub edition_lint_opts: Option<(Edition, Level)>,
+
+    /// Whether this lint is reported even inside expansions of external macros
+    pub report_in_external_macro: bool,
 }
 
 impl Lint {
+    /// Returns the `rust::lint::Lint` for a `syntax::early_buffered_lints::BufferedEarlyLintId`.
+    pub fn from_parser_lint_id(lint_id: BufferedEarlyLintId) -> &'static Self {
+        match lint_id {
+            BufferedEarlyLintId::QuestionMarkMacroSep => QUESTION_MARK_MACRO_SEP,
+        }
+    }
+
     /// Get the lint's name, with ASCII letters converted to lowercase.
     pub fn name_lower(&self) -> String {
         self.name.to_ascii_lowercase()
@@ -100,21 +112,29 @@ impl Lint {
 #[macro_export]
 macro_rules! declare_lint {
     ($vis: vis $NAME: ident, $Level: ident, $desc: expr) => (
+        declare_lint!{$vis $NAME, $Level, $desc, false}
+    );
+    ($vis: vis $NAME: ident, $Level: ident, $desc: expr, report_in_external_macro: $rep: expr) => (
+        declare_lint!{$vis $NAME, $Level, $desc, $rep}
+    );
+    ($vis: vis $NAME: ident, $Level: ident, $desc: expr, $external: expr) => (
         $vis static $NAME: &$crate::lint::Lint = &$crate::lint::Lint {
             name: stringify!($NAME),
             default_level: $crate::lint::$Level,
             desc: $desc,
             edition_lint_opts: None,
+            report_in_external_macro: $external,
         };
     );
     ($vis: vis $NAME: ident, $Level: ident, $desc: expr,
-     $lint_edition: expr => $edition_level: ident $(,)?
+     $lint_edition: expr => $edition_level: ident
     ) => (
         $vis static $NAME: &$crate::lint::Lint = &$crate::lint::Lint {
             name: stringify!($NAME),
             default_level: $crate::lint::$Level,
             desc: $desc,
             edition_lint_opts: Some(($lint_edition, $crate::lint::Level::$edition_level)),
+            report_in_external_macro: false,
         };
     );
 }
@@ -122,7 +142,8 @@ macro_rules! declare_lint {
 /// Declare a static `LintArray` and return it as an expression.
 #[macro_export]
 macro_rules! lint_array {
-    ($( $lint:expr ),* $(,)?) => {{
+    ($( $lint:expr ),* ,) => { lint_array!( $($lint),* ) };
+    ($( $lint:expr ),*) => {{
         vec![$($lint),*]
     }}
 }
@@ -327,6 +348,8 @@ pub trait EarlyLintPass: LintPass {
     fn check_lifetime(&mut self, _: &EarlyContext, _: &ast::Lifetime) { }
     fn check_path(&mut self, _: &EarlyContext, _: &ast::Path, _: ast::NodeId) { }
     fn check_attribute(&mut self, _: &EarlyContext, _: &ast::Attribute) { }
+    fn check_mac_def(&mut self, _: &EarlyContext, _: &ast::MacroDef, _id: ast::NodeId) { }
+    fn check_mac(&mut self, _: &EarlyContext, _: &ast::Mac) { }
 
     /// Called when entering a syntax node that can have lint attributes such
     /// as `#[allow(...)]`. Called with *all* the attributes of that node.
@@ -341,6 +364,8 @@ pub type EarlyLintPassObject = Box<dyn EarlyLintPass + sync::Send + sync::Sync +
 pub type LateLintPassObject = Box<dyn for<'a, 'tcx> LateLintPass<'a, 'tcx> + sync::Send
                                                                            + sync::Sync + 'static>;
 
+
+
 /// Identifies a lint known to the compiler.
 #[derive(Clone, Copy, Debug)]
 pub struct LintId {
@@ -350,7 +375,7 @@ pub struct LintId {
 
 impl PartialEq for LintId {
     fn eq(&self, other: &LintId) -> bool {
-        (self.lint as *const Lint) == (other.lint as *const Lint)
+        ptr::eq(self.lint, other.lint)
     }
 }
 
@@ -568,6 +593,21 @@ pub fn struct_lint_level<'a>(sess: &'a Session,
                                future_incompatible.reference);
         err.warn(&explanation);
         err.note(&citation);
+
+    // If this lint is *not* a future incompatibility warning then we want to be
+    // sure to not be too noisy in some situations. If this code originates in a
+    // foreign macro, aka something that this crate did not itself author, then
+    // it's likely that there's nothing this crate can do about it. We probably
+    // want to skip the lint entirely.
+    //
+    // For some lints though (like unreachable code) there's clear actionable
+    // items to take care of (delete the macro invocation). As a result we have
+    // a few lints we whitelist here for allowing a lint even though it's in a
+    // foreign macro invocation.
+    } else if !lint.report_in_external_macro {
+        if err.span.primary_spans().iter().any(|s| in_external_macro(sess, *s)) {
+            err.cancel();
+        }
     }
 
     return err
@@ -668,4 +708,33 @@ impl<'a, 'tcx> intravisit::Visitor<'tcx> for LintLevelMapBuilder<'a, 'tcx> {
 
 pub fn provide(providers: &mut Providers) {
     providers.lint_levels = lint_levels;
+}
+
+/// Returns whether `span` originates in a foreign crate's external macro.
+///
+/// This is used to test whether a lint should be entirely aborted above.
+pub fn in_external_macro(sess: &Session, span: Span) -> bool {
+    let info = match span.ctxt().outer().expn_info() {
+        Some(info) => info,
+        // no ExpnInfo means this span doesn't come from a macro
+        None => return false,
+    };
+
+    match info.format {
+        ExpnFormat::MacroAttribute(..) => return true, // definitely a plugin
+        ExpnFormat::CompilerDesugaring(_) => return true, // well, it's "external"
+        ExpnFormat::MacroBang(..) => {} // check below
+    }
+
+    let def_site = match info.def_site {
+        Some(span) => span,
+        // no span for the def_site means it's an external macro
+        None => return true,
+    };
+
+    match sess.codemap().span_to_snippet(def_site) {
+        Ok(code) => !code.starts_with("macro_rules"),
+        // no snippet = external macro or compiler-builtin expansion
+        Err(_) => true,
+    }
 }

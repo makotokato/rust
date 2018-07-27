@@ -188,7 +188,6 @@ pub use self::StaticFields::*;
 pub use self::SubstructureFields::*;
 
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::vec;
 
 use rustc_target::spec::abi::Abi;
@@ -330,7 +329,7 @@ pub enum SubstructureFields<'a> {
 /// Combine the values of all the fields together. The last argument is
 /// all the fields of all the structures.
 pub type CombineSubstructureFunc<'a> =
-    Box<FnMut(&mut ExtCtxt, Span, &Substructure) -> P<Expr> + 'a>;
+    Box<dyn FnMut(&mut ExtCtxt, Span, &Substructure) -> P<Expr> + 'a>;
 
 /// Deal with non-matching enum variants.  The tuple is a list of
 /// identifiers (one for each `Self` argument, which could be any of the
@@ -338,7 +337,7 @@ pub type CombineSubstructureFunc<'a> =
 /// holding the variant index value for each of the `Self` arguments.  The
 /// last argument is all the non-`Self` args of the method being derived.
 pub type EnumNonMatchCollapsedFunc<'a> =
-    Box<FnMut(&mut ExtCtxt, Span, (&[Ident], &[Ident]), &[P<Expr>]) -> P<Expr> + 'a>;
+    Box<dyn FnMut(&mut ExtCtxt, Span, (&[Ident], &[Ident]), &[P<Expr>]) -> P<Expr> + 'a>;
 
 pub fn combine_substructure<'a>(f: CombineSubstructureFunc<'a>)
                                 -> RefCell<CombineSubstructureFunc<'a>> {
@@ -398,7 +397,7 @@ impl<'a> TraitDef<'a> {
                   cx: &mut ExtCtxt,
                   mitem: &ast::MetaItem,
                   item: &'a Annotatable,
-                  push: &mut FnMut(Annotatable)) {
+                  push: &mut dyn FnMut(Annotatable)) {
         self.expand_ext(cx, mitem, item, push, false);
     }
 
@@ -406,7 +405,7 @@ impl<'a> TraitDef<'a> {
                       cx: &mut ExtCtxt,
                       mitem: &ast::MetaItem,
                       item: &'a Annotatable,
-                      push: &mut FnMut(Annotatable),
+                      push: &mut dyn FnMut(Annotatable),
                       from_scratch: bool) {
         match *item {
             Annotatable::Item(ref item) => {
@@ -617,7 +616,6 @@ impl<'a> TraitDef<'a> {
                     .map(|ty_param| ty_param.ident.name)
                     .collect();
 
-                let mut processed_field_types = HashSet::new();
                 for field_ty in field_tys {
                     let tys = find_type_parameters(&field_ty, &ty_param_names, self.span, cx);
 
@@ -625,11 +623,9 @@ impl<'a> TraitDef<'a> {
                         // if we have already handled this type, skip it
                         if let ast::TyKind::Path(_, ref p) = ty.node {
                             if p.segments.len() == 1 &&
-                            ty_param_names.contains(&p.segments[0].ident.name) ||
-                            processed_field_types.contains(&p.segments) {
+                               ty_param_names.contains(&p.segments[0].ident.name) {
                                 continue;
                             };
-                            processed_field_types.insert(p.segments.clone());
                         }
                         let mut bounds: Vec<_> = self.additional_bounds
                             .iter()
@@ -913,7 +909,7 @@ impl<'a> MethodDef<'a> {
                 Self_ if nonstatic => {
                     self_args.push(arg_expr);
                 }
-                Ptr(ref ty, _) if **ty == Self_ && nonstatic => {
+                Ptr(ref ty, _) if (if let Self_ = **ty { true } else { false }) && nonstatic => {
                     self_args.push(cx.expr_deref(trait_.span, arg_expr))
                 }
                 _ => {

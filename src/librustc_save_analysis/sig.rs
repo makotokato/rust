@@ -306,7 +306,7 @@ impl Sig for ast::Ty {
                 let nested = pprust::bounds_to_string(bounds);
                 Ok(text_sig(nested))
             }
-            ast::TyKind::ImplTrait(ref bounds) => {
+            ast::TyKind::ImplTrait(_, ref bounds) => {
                 // FIXME recurse into bounds
                 let nested = pprust::bounds_to_string(bounds);
                 Ok(text_sig(format!("impl {}", nested)))
@@ -443,6 +443,18 @@ impl Sig for ast::Item {
                     defs,
                     refs: vec![],
                 })
+            }
+            ast::ItemKind::Existential(ref bounds, ref generics) => {
+                let text = "existential type ".to_owned();
+                let mut sig = name_and_generics(text, offset, generics, self.id, self.ident, scx)?;
+
+                if !bounds.is_empty() {
+                    sig.text.push_str(": ");
+                    sig.text.push_str(&pprust::bounds_to_string(bounds));
+                }
+                sig.text.push(';');
+
+                Ok(sig)
             }
             ast::ItemKind::Ty(ref ty, ref generics) => {
                 let text = "type ".to_owned();

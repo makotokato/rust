@@ -377,7 +377,23 @@ pub enum NLLRegionVariableOrigin {
     // elsewhere. This origin indices we've got one of those.
     FreeRegion,
 
-    Inferred(::mir::visit::TyContext),
+    BoundRegion(ty::UniverseIndex),
+
+    Existential,
+}
+
+impl NLLRegionVariableOrigin {
+    pub fn is_universal(self) -> bool {
+        match self {
+            NLLRegionVariableOrigin::FreeRegion => true,
+            NLLRegionVariableOrigin::BoundRegion(..) => true,
+            NLLRegionVariableOrigin::Existential => false,
+        }
+    }
+
+    pub fn is_existential(self) -> bool {
+        !self.is_universal()
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -562,36 +578,25 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
     }
 
     pub fn unsolved_variables(&self) -> Vec<Ty<'tcx>> {
-        let mut variables = Vec::new();
+        let mut type_variables = self.type_variables.borrow_mut();
+        let mut int_unification_table = self.int_unification_table.borrow_mut();
+        let mut float_unification_table = self.float_unification_table.borrow_mut();
 
-        {
-            let mut type_variables = self.type_variables.borrow_mut();
-            variables.extend(
-                type_variables
-                    .unsolved_variables()
-                    .into_iter()
-                    .map(|t| self.tcx.mk_var(t)));
-        }
-
-        {
-            let mut int_unification_table = self.int_unification_table.borrow_mut();
-            variables.extend(
+        type_variables
+            .unsolved_variables()
+            .into_iter()
+            .map(|t| self.tcx.mk_var(t))
+            .chain(
                 (0..int_unification_table.len())
                     .map(|i| ty::IntVid { index: i as u32 })
                     .filter(|&vid| int_unification_table.probe_value(vid).is_none())
-                    .map(|v| self.tcx.mk_int_var(v)));
-        }
-
-        {
-            let mut float_unification_table = self.float_unification_table.borrow_mut();
-            variables.extend(
+                    .map(|v| self.tcx.mk_int_var(v))
+            ).chain(
                 (0..float_unification_table.len())
                     .map(|i| ty::FloatVid { index: i as u32 })
                     .filter(|&vid| float_unification_table.probe_value(vid).is_none())
-                    .map(|v| self.tcx.mk_float_var(v)));
-        }
-
-        return variables;
+                    .map(|v| self.tcx.mk_float_var(v))
+            ).collect()
     }
 
     fn combine_fields(&'a self, trace: TypeTrace<'tcx>, param_env: ty::ParamEnv<'tcx>)
@@ -1391,6 +1396,17 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
 
     fn universe(&self) -> ty::UniverseIndex {
         self.universe.get()
+    }
+
+    /// Create and return a new subunivese of the current universe;
+    /// update `self.universe` to that new subuniverse. At present,
+    /// used only in the NLL subtyping code, which uses the new
+    /// universe-based scheme instead of the more limited leak-check
+    /// scheme.
+    pub fn create_subuniverse(&self) -> ty::UniverseIndex {
+        let u = self.universe.get().subuniverse();
+        self.universe.set(u);
+        u
     }
 }
 

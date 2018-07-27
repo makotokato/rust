@@ -22,7 +22,7 @@ use middle::dependency_format;
 use session::search_paths::PathKind;
 use session::config::{OutputType};
 use ty::tls;
-use util::nodemap::{FxHashSet};
+use util::nodemap::{FxHashMap, FxHashSet};
 use util::common::{duration_to_secs_str, ErrorReported};
 use util::common::ProfileQueriesMsg;
 
@@ -160,6 +160,9 @@ pub struct Session {
 
     /// Metadata about the allocators for the current crate being compiled
     pub has_global_allocator: Once<bool>,
+
+    /// Cap lint level specified by a driver specifically.
+    pub driver_lint_caps: FxHashMap<lint::LintId, lint::Level>,
 }
 
 pub struct PerfStats {
@@ -513,8 +516,8 @@ impl Session {
     pub fn asm_comments(&self) -> bool {
         self.opts.debugging_opts.asm_comments
     }
-    pub fn no_verify(&self) -> bool {
-        self.opts.debugging_opts.no_verify
+    pub fn verify_llvm_ir(&self) -> bool {
+        self.opts.debugging_opts.verify_llvm_ir
     }
     pub fn borrowck_stats(&self) -> bool {
         self.opts.debugging_opts.borrowck_stats
@@ -997,6 +1000,7 @@ pub fn build_session_with_codemap(
     let can_emit_warnings = !(warnings_allow || cap_lints_allow);
 
     let treat_err_as_bug = sopts.debugging_opts.treat_err_as_bug;
+    let report_delayed_bugs = sopts.debugging_opts.report_delayed_bugs;
 
     let external_macro_backtrace = sopts.debugging_opts.external_macro_backtrace;
 
@@ -1042,6 +1046,7 @@ pub fn build_session_with_codemap(
         errors::HandlerFlags {
             can_emit_warnings,
             treat_err_as_bug,
+            report_delayed_bugs,
             external_macro_backtrace,
             ..Default::default()
         },
@@ -1164,6 +1169,7 @@ pub fn build_session_(
             (*GLOBAL_JOBSERVER).clone()
         },
         has_global_allocator: Once::new(),
+        driver_lint_caps: FxHashMap(),
     };
 
     sess

@@ -28,7 +28,7 @@ use syntax_pos::Span;
 use parse::token::Token;
 use tokenstream::{TokenTree, TokenStream};
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone)]
 pub enum FnKind<'a> {
     /// fn foo() or extern "Abi" fn foo()
     ItemFn(Ident, FnHeader, &'a Visibility, &'a Block),
@@ -252,6 +252,10 @@ pub fn walk_item<'a, V: Visitor<'a>>(visitor: &mut V, item: &'a Item) {
             visitor.visit_ty(typ);
             visitor.visit_generics(type_parameters)
         }
+        ItemKind::Existential(ref bounds, ref type_parameters) => {
+            walk_list!(visitor, visit_param_bound, bounds);
+            visitor.visit_generics(type_parameters)
+        }
         ItemKind::Enum(ref enum_definition, ref type_parameters) => {
             visitor.visit_generics(type_parameters);
             visitor.visit_enum_def(enum_definition, type_parameters, item.id, item.span)
@@ -338,7 +342,7 @@ pub fn walk_ty<'a, V: Visitor<'a>>(visitor: &mut V, typ: &'a Ty) {
             visitor.visit_anon_const(length)
         }
         TyKind::TraitObject(ref bounds, ..) |
-        TyKind::ImplTrait(ref bounds) => {
+        TyKind::ImplTrait(_, ref bounds) => {
             walk_list!(visitor, visit_param_bound, bounds);
         }
         TyKind::Typeof(ref expression) => {
@@ -599,6 +603,9 @@ pub fn walk_impl_item<'a, V: Visitor<'a>>(visitor: &mut V, impl_item: &'a ImplIt
         }
         ImplItemKind::Type(ref ty) => {
             visitor.visit_ty(ty);
+        }
+        ImplItemKind::Existential(ref bounds) => {
+            walk_list!(visitor, visit_param_bound, bounds);
         }
         ImplItemKind::Macro(ref mac) => {
             visitor.visit_mac(mac);

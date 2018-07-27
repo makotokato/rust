@@ -13,16 +13,19 @@
 use std::iter::once;
 
 use syntax::ast;
-use rustc::hir;
+use syntax::ext::base::MacroKind;
+use syntax_pos::Span;
 
+use rustc::hir;
 use rustc::hir::def::{Def, CtorKind};
 use rustc::hir::def_id::DefId;
+use rustc::middle::cstore::LoadedMacro;
 use rustc::ty;
 use rustc::util::nodemap::FxHashSet;
 
 use core::{DocContext, DocAccessLevels};
 use doctree;
-use clean::{self, GetDefId, get_auto_traits_with_def_id};
+use clean::{self, GetDefId, ToSource, get_auto_traits_with_def_id};
 
 use super::Clean;
 
@@ -97,9 +100,16 @@ pub fn try_inline(cx: &DocContext, def: Def, name: ast::Name, visited: &mut FxHa
             record_extern_fqn(cx, did, clean::TypeKind::Const);
             clean::ConstantItem(build_const(cx, did))
         }
-        // Macros are eagerly inlined back in visit_ast, don't show their export statements
-        // FIXME(50647): the eager inline does not take doc(hidden)/doc(no_inline) into account
-        Def::Macro(..) => return Some(Vec::new()),
+        // FIXME(misdreavus): if attributes/derives come down here we should probably document them
+        // separately
+        Def::Macro(did, MacroKind::Bang) => {
+            record_extern_fqn(cx, did, clean::TypeKind::Macro);
+            if let Some(mac) = build_macro(cx, did, name) {
+                clean::MacroItem(mac)
+            } else {
+                return None;
+            }
+        }
         _ => return None,
     };
     cx.renderinfo.borrow_mut().inlined.insert(did);
@@ -391,7 +401,7 @@ pub fn build_impl(cx: &DocContext, did: DefId, ret: &mut Vec<clean::Item>) {
     let provided = trait_.def_id().map(|did| {
         tcx.provided_trait_methods(did)
            .into_iter()
-           .map(|meth| meth.name.to_string())
+           .map(|meth| meth.ident.to_string())
            .collect()
     }).unwrap_or(FxHashSet());
 
@@ -458,6 +468,33 @@ fn build_static(cx: &DocContext, did: DefId, mutable: bool) -> clean::Static {
         mutability: if mutable {clean::Mutable} else {clean::Immutable},
         expr: "\n\n\n".to_string(), // trigger the "[definition]" links
     }
+}
+
+fn build_macro(cx: &DocContext, did: DefId, name: ast::Name) -> Option<clean::Macro> {
+    let imported_from = cx.tcx.original_crate_name(did.krate);
+    let def = match cx.cstore.load_macro_untracked(did, cx.sess()) {
+        LoadedMacro::MacroDef(macro_def) => macro_def,
+        // FIXME(jseyfried): document proc macro re-exports
+        LoadedMacro::ProcMacro(..) => return None,
+    };
+
+    let matchers: hir::HirVec<Span> = if let ast::ItemKind::MacroDef(ref def) = def.node {
+        let tts: Vec<_> = def.stream().into_trees().collect();
+        tts.chunks(4).map(|arm| arm[0].span()).collect()
+    } else {
+        unreachable!()
+    };
+
+    let source = format!("macro_rules! {} {{\n{}}}",
+                         name.clean(cx),
+                         matchers.iter().map(|span| {
+                             format!("    {} => {{ ... }};\n", span.to_src(cx))
+                         }).collect::<String>());
+
+    Some(clean::Macro {
+        source,
+        imported_from: Some(imported_from).clean(cx),
+    })
 }
 
 /// A trait's generics clause actually contains all of the predicates for all of

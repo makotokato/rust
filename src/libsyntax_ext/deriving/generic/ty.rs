@@ -24,8 +24,7 @@ use syntax_pos::Span;
 use syntax_pos::symbol::keywords;
 
 /// The types of pointers
-#[derive(Clone, Eq, PartialEq)]
-#[allow(dead_code)]
+#[derive(Clone)]
 pub enum PtrTy<'a> {
     /// &'lifetime mut
     Borrowed(Option<&'a str>, ast::Mutability),
@@ -35,7 +34,7 @@ pub enum PtrTy<'a> {
 
 /// A path, e.g. `::std::option::Option::<i32>` (global). Has support
 /// for type parameters and a lifetime.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct Path<'a> {
     path: Vec<&'a str>,
     lifetime: Option<&'a str>,
@@ -43,7 +42,7 @@ pub struct Path<'a> {
     kind: PathKind,
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone)]
 pub enum PathKind {
     Local,
     Global,
@@ -107,7 +106,7 @@ impl<'a> Path<'a> {
 }
 
 /// A type. Supports pointers, Self, and literals
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone)]
 pub enum Ty<'a> {
     Self_,
     /// &/Box/ Ty
@@ -139,17 +138,13 @@ pub fn nil_ty<'r>() -> Ty<'r> {
 }
 
 fn mk_lifetime(cx: &ExtCtxt, span: Span, lt: &Option<&str>) -> Option<ast::Lifetime> {
-    match *lt {
-        Some(s) => Some(cx.lifetime(span, Ident::from_str(s))),
-        None => None,
-    }
+    lt.map(|s|
+        cx.lifetime(span, Ident::from_str(s))
+    )
 }
 
 fn mk_lifetimes(cx: &ExtCtxt, span: Span, lt: &Option<&str>) -> Vec<ast::Lifetime> {
-    match *lt {
-        Some(s) => vec![cx.lifetime(span, Ident::from_str(s))],
-        None => vec![],
-    }
+    mk_lifetime(cx, span, lt).into_iter().collect()
 }
 
 impl<'a> Ty<'a> {

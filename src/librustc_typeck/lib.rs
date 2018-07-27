@@ -70,6 +70,7 @@ This API is completely unstable and subject to change.
       html_root_url = "https://doc.rust-lang.org/nightly/")]
 
 #![allow(non_camel_case_types)]
+#![deny(bare_trait_objects)]
 
 #![feature(box_patterns)]
 #![feature(box_syntax)]
@@ -188,7 +189,7 @@ fn check_main_fn_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             match tcx.hir.find(main_id) {
                 Some(hir_map::NodeItem(it)) => {
                     match it.node {
-                        hir::ItemFn(.., ref generics, _) => {
+                        hir::ItemKind::Fn(.., ref generics, _) => {
                             let mut error = false;
                             if !generics.params.is_empty() {
                                 let msg = format!("`main` function is not allowed to have generic \
@@ -260,7 +261,7 @@ fn check_start_fn_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             match tcx.hir.find(start_id) {
                 Some(hir_map::NodeItem(it)) => {
                     match it.node {
-                        hir::ItemFn(.., ref generics, _) => {
+                        hir::ItemKind::Fn(.., ref generics, _) => {
                             let mut error = false;
                             if !generics.params.is_empty() {
                                 struct_span_err!(tcx.sess, generics.span, E0132,

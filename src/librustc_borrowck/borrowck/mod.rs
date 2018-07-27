@@ -39,6 +39,7 @@ use rustc::middle::free_region::RegionRelations;
 use rustc::ty::{self, Ty, TyCtxt};
 use rustc::ty::query::Providers;
 use rustc_mir::util::borrowck_errors::{BorrowckErrors, Origin};
+use rustc_mir::util::suggest_ref_mut;
 use rustc::util::nodemap::FxHashSet;
 
 use std::cell::RefCell;
@@ -89,6 +90,8 @@ pub struct AnalysisData<'a, 'tcx: 'a> {
 fn borrowck<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, owner_def_id: DefId)
     -> Lrc<BorrowCheckResult>
 {
+    assert!(tcx.use_ast_borrowck());
+
     debug!("borrowck(body_owner_def_id={:?})", owner_def_id);
 
     let owner_id = tcx.hir.as_local_node_id(owner_def_id).unwrap();
@@ -406,7 +409,7 @@ fn closure_to_block(closure_id: LocalDefId,
     let closure_id = tcx.hir.local_def_id_to_node_id(closure_id);
     match tcx.hir.get(closure_id) {
         hir_map::NodeExpr(expr) => match expr.node {
-            hir::ExprClosure(.., body_id, _, _) => {
+            hir::ExprKind::Closure(.., body_id, _, _) => {
                 body_id.node_id
             }
             _ => {
@@ -719,7 +722,7 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
 
             move_data::Captured =>
                 (match self.tcx.hir.expect_expr(node_id).node {
-                    hir::ExprClosure(.., fn_decl_span, _) => fn_decl_span,
+                    hir::ExprKind::Closure(.., fn_decl_span, _) => fn_decl_span,
                     ref r => bug!("Captured({:?}) maps to non-closure: {:?}",
                                   the_move.id, r),
                 }, " (into closure)"),
@@ -899,7 +902,11 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
                 };
 
                 self.note_and_explain_mutbl_error(&mut db, &err, &error_span);
-                self.note_immutability_blame(&mut db, err.cmt.immutability_blame(), err.cmt.id);
+                self.note_immutability_blame(
+                    &mut db,
+                    err.cmt.immutability_blame(),
+                    self.tcx.hir.hir_to_node_id(err.cmt.hir_id)
+                );
                 db.emit();
             }
             err_out_of_scope(super_scope, sub_scope, cause) => {
@@ -1005,7 +1012,10 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
                     let node_id = scope.node_id(self.tcx, &self.region_scope_tree);
                     match self.tcx.hir.find(node_id) {
                         Some(hir_map::NodeStmt(_)) => {
-                            db.note("consider using a `let` binding to increase its lifetime");
+                            if *sub_scope != ty::ReStatic {
+                                db.note("consider using a `let` binding to increase its lifetime");
+                            }
+
                         }
                         _ => {}
                     }
@@ -1105,7 +1115,11 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
                                                             Origin::Ast)
             }
         };
-        self.note_immutability_blame(&mut err, blame, cmt.id);
+        self.note_immutability_blame(
+            &mut err,
+            blame,
+            self.tcx.hir.hir_to_node_id(cmt.hir_id)
+        );
 
         if is_closure {
             err.help("closures behind references must be called via `&mut`");
@@ -1117,7 +1131,7 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
     fn suggest_mut_for_immutable(&self, pty: &hir::Ty, is_implicit_self: bool) -> Option<String> {
         // Check whether the argument is an immutable reference
         debug!("suggest_mut_for_immutable({:?}, {:?})", pty, is_implicit_self);
-        if let hir::TyRptr(lifetime, hir::MutTy {
+        if let hir::TyKind::Rptr(lifetime, hir::MutTy {
             mutbl: hir::Mutability::MutImmutable,
             ref ty
         }) = pty.node {
@@ -1193,15 +1207,15 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
                 self.note_immutable_local(db, error_node_id, node_id)
             }
             Some(ImmutabilityBlame::LocalDeref(node_id)) => {
-                let let_span = self.tcx.hir.span(node_id);
                 match self.local_binding_mode(node_id) {
                     ty::BindByReference(..) => {
-                        let snippet = self.tcx.sess.codemap().span_to_snippet(let_span);
-                        if let Ok(snippet) = snippet {
-                            db.span_label(
+                        let let_span = self.tcx.hir.span(node_id);
+                        let suggestion = suggest_ref_mut(self.tcx, let_span);
+                        if let Some((let_span, replace_str)) = suggestion {
+                            db.span_suggestion(
                                 let_span,
-                                format!("consider changing this to `{}`",
-                                         snippet.replace("ref ", "ref mut "))
+                                "use a mutable reference instead",
+                                replace_str,
                             );
                         }
                     }
@@ -1245,7 +1259,7 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
                     // avoid suggesting `mut &self`.
                     return
                 }
-                if let Some(&hir::TyRptr(
+                if let Some(&hir::TyKind::Rptr(
                     _,
                     hir::MutTy {
                         mutbl: hir::MutMutable,

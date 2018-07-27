@@ -833,17 +833,46 @@ impl<T> Option<T> {
     ///
     /// ```
     /// let mut x = Some(2);
-    /// x.take();
+    /// let y = x.take();
     /// assert_eq!(x, None);
+    /// assert_eq!(y, Some(2));
     ///
     /// let mut x: Option<u32> = None;
-    /// x.take();
+    /// let y = x.take();
     /// assert_eq!(x, None);
+    /// assert_eq!(y, None);
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn take(&mut self) -> Option<T> {
         mem::replace(self, None)
+    }
+
+    /// Replaces the actual value in the option by the value given in parameter,
+    /// returning the old value if present,
+    /// leaving a [`Some`] in its place without deinitializing either one.
+    ///
+    /// [`Some`]: #variant.Some
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(option_replace)]
+    ///
+    /// let mut x = Some(2);
+    /// let old = x.replace(5);
+    /// assert_eq!(x, Some(5));
+    /// assert_eq!(old, Some(2));
+    ///
+    /// let mut x = None;
+    /// let old = x.replace(3);
+    /// assert_eq!(x, Some(3));
+    /// assert_eq!(old, None);
+    /// ```
+    #[inline]
+    #[unstable(feature = "option_replace", issue = "51998")]
+    pub fn replace(&mut self, value: T) -> Option<T> {
+        mem::replace(self, Some(value))
     }
 }
 

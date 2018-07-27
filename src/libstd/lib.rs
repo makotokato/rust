@@ -233,8 +233,9 @@
 // std is implemented with unstable features, many of which are internal
 // compiler details that will never be stable
 #![feature(alloc)]
-#![feature(allocator_api)]
+#![feature(alloc_error_handler)]
 #![feature(alloc_system)]
+#![feature(allocator_api)]
 #![feature(allocator_internals)]
 #![feature(allow_internal_unsafe)]
 #![feature(allow_internal_unstable)]
@@ -322,7 +323,7 @@
 #![feature(doc_keyword)]
 #![feature(float_internals)]
 #![feature(panic_info_message)]
-#![cfg_attr(not(stage0), feature(panic_implementation))]
+#![feature(panic_implementation)]
 
 #![default_lib_allocator]
 
@@ -332,9 +333,6 @@
 // `force_alloc_system` is *only* intended as a workaround for local rebuilds
 // with a rustc without jemalloc.
 // FIXME(#44236) shouldn't need MSVC logic
-#![cfg_attr(all(not(target_env = "msvc"),
-                any(all(stage0, not(test)), feature = "force_alloc_system")),
-            feature(global_allocator))]
 #[cfg(all(not(target_env = "msvc"),
           any(all(stage0, not(test)), feature = "force_alloc_system")))]
 #[global_allocator]
@@ -534,12 +532,8 @@ mod stdsimd;
 #[cfg(not(stage0))]
 mod coresimd {
     pub use core::arch;
-    pub use core::simd;
 }
 
-#[unstable(feature = "stdsimd", issue = "48556")]
-#[cfg(all(not(stage0), not(test)))]
-pub use stdsimd::simd;
 #[stable(feature = "simd_arch", since = "1.27.0")]
 #[cfg(all(not(stage0), not(test)))]
 pub use stdsimd::arch;

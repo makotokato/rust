@@ -23,7 +23,6 @@ use hir::def_id::DefId;
 use lint;
 use traits;
 use ty::{self, Ty, TyCtxt, TypeFoldable};
-use ty::subst::Substs;
 use ty::util::ExplicitSelf;
 use std::borrow::Cow;
 use syntax::ast;
@@ -130,7 +129,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             .filter(|item| item.kind == ty::AssociatedKind::Method)
             .filter_map(|item| {
                 self.object_safety_violation_for_method(trait_def_id, &item)
-                    .map(|code| ObjectSafetyViolation::Method(item.name, code))
+                    .map(|code| ObjectSafetyViolation::Method(item.ident.name, code))
             }).filter(|violation| {
                 if let ObjectSafetyViolation::Method(_,
                                 MethodViolationCode::WhereClauseReferencesSelf(span)) = violation {
@@ -159,7 +158,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
 
         violations.extend(self.associated_items(trait_def_id)
             .filter(|item| item.kind == ty::AssociatedKind::Const)
-            .map(|item| ObjectSafetyViolation::AssociatedConst(item.name)));
+            .map(|item| ObjectSafetyViolation::AssociatedConst(item.ident.name)));
 
         debug!("object_safety_violations_for_trait(trait_def_id={:?}) = {:?}",
                trait_def_id,
@@ -173,10 +172,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         trait_def_id: DefId,
         supertraits_only: bool) -> bool
     {
-        let trait_ref = ty::Binder::dummy(ty::TraitRef {
-            def_id: trait_def_id,
-            substs: Substs::identity_for_item(self, trait_def_id)
-        });
+        let trait_ref = ty::Binder::dummy(ty::TraitRef::identity(self, trait_def_id));
         let predicates = if supertraits_only {
             self.super_predicates_of(trait_def_id)
         } else {
@@ -391,10 +387,9 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
 
                     // Compute supertraits of current trait lazily.
                     if supertraits.is_none() {
-                        let trait_ref = ty::Binder::bind(ty::TraitRef {
-                            def_id: trait_def_id,
-                            substs: Substs::identity_for_item(self, trait_def_id)
-                        });
+                        let trait_ref = ty::Binder::bind(
+                            ty::TraitRef::identity(self, trait_def_id),
+                        );
                         supertraits = Some(traits::supertraits(self, trait_ref).collect());
                     }
 

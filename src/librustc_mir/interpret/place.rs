@@ -7,7 +7,7 @@ use rustc::mir::interpret::{GlobalId, Value, Scalar, EvalResult, Pointer};
 use super::{EvalContext, Machine, ValTy};
 use interpret::memory::HasMemory;
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Place {
     /// A place referring to a value allocated in the `Memory` system.
     Ptr {
@@ -24,7 +24,7 @@ pub enum Place {
     Local { frame: usize, local: mir::Local },
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum PlaceExtra {
     None,
     Length(u64),
@@ -109,6 +109,7 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
             Local(local) => self.frame().get_local(local).map(Some),
             // No fast path for statics. Reading from statics is rare and would require another
             // Machine function to handle differently in miri.
+            Promoted(_) |
             Static(_) => Ok(None),
             Projection(ref proj) => self.try_read_place_projection(proj),
         }
@@ -213,6 +214,23 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
                 frame: self.cur_frame(),
                 local,
             },
+
+            Promoted(ref promoted) => {
+                let instance = self.frame().instance;
+                let val = self.read_global_as_value(GlobalId {
+                    instance,
+                    promoted: Some(promoted.0),
+                })?;
+                if let Value::ByRef(ptr, align) = val {
+                    Place::Ptr {
+                        ptr,
+                        align,
+                        extra: PlaceExtra::None,
+                    }
+                } else {
+                    bug!("evaluated promoted and got {:#?}", val);
+                }
+            }
 
             Static(ref static_) => {
                 let layout = self.layout_of(self.place_ty(mir_place))?;

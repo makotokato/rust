@@ -627,7 +627,7 @@ impl<'tcx> TypeckTables<'tcx> {
     pub fn is_method_call(&self, expr: &hir::Expr) -> bool {
         // Only paths and method calls/overloaded operators have
         // entries in type_dependent_defs, ignore the former here.
-        if let hir::ExprPath(_) = expr.node {
+        if let hir::ExprKind::Path(_) = expr.node {
             return false;
         }
 
@@ -849,7 +849,7 @@ impl<'tcx> CommonTypes<'tcx> {
 ///
 /// [rustc guide]: https://rust-lang-nursery.github.io/rustc-guide/ty.html
 #[derive(Copy, Clone)]
-pub struct TyCtxt<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
+pub struct TyCtxt<'a, 'gcx: 'tcx, 'tcx: 'a> {
     gcx: &'a GlobalCtxt<'gcx>,
     interners: &'a CtxtInterners<'tcx>
 }
@@ -1352,6 +1352,12 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     /// guard could perform bad mutations (or mutable-borrows).
     pub fn check_for_mutation_in_guard_via_ast_walk(self) -> bool {
         !self.sess.opts.debugging_opts.disable_ast_check_for_mutation_in_guard
+    }
+
+    /// If true, we should use the AST-based borrowck (we may *also* use
+    /// the MIR-based borrowck).
+    pub fn use_ast_borrowck(self) -> bool {
+        self.borrowck_mode().use_ast()
     }
 
     /// If true, we should use the MIR-based borrowck (we may *also* use

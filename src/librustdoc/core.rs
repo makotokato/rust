@@ -25,7 +25,7 @@ use rustc_metadata::creader::CrateLoader;
 use rustc_metadata::cstore::CStore;
 use rustc_target::spec::TargetTriple;
 
-use syntax::ast::NodeId;
+use syntax::ast::{Name, NodeId};
 use syntax::codemap;
 use syntax::edition::Edition;
 use syntax::feature_gate::UnstableFeatures;
@@ -82,7 +82,8 @@ pub struct DocContext<'a, 'tcx: 'a, 'rcx: 'a> {
     pub fake_def_ids: RefCell<FxHashMap<CrateNum, DefId>>,
     pub all_fake_def_ids: RefCell<FxHashSet<DefId>>,
     /// Maps (type_id, trait_id) -> auto trait impl
-    pub generated_synthetics: RefCell<FxHashSet<(DefId, DefId)>>
+    pub generated_synthetics: RefCell<FxHashSet<(DefId, DefId)>>,
+    pub current_item_name: RefCell<Option<Name>>,
 }
 
 impl<'a, 'tcx, 'rcx> DocContext<'a, 'tcx, 'rcx> {
@@ -161,6 +162,7 @@ pub fn new_handler(error_format: ErrorOutputType, codemap: Option<Lrc<codemap::C
         errors::HandlerFlags {
             can_emit_warnings: true,
             treat_err_as_bug: false,
+            report_delayed_bugs: false,
             external_macro_backtrace: false,
             ..Default::default()
         },
@@ -178,7 +180,10 @@ pub fn run_core(search_paths: SearchPaths,
                 force_unstable_if_unmarked: bool,
                 edition: Edition,
                 cg: CodegenOptions,
-                error_format: ErrorOutputType) -> (clean::Crate, RenderInfo)
+                error_format: ErrorOutputType,
+                cmd_lints: Vec<(String, lint::Level)>,
+                lint_cap: Option<lint::Level>,
+                describe_lints: bool) -> (clean::Crate, RenderInfo)
 {
     // Parse, resolve, and typecheck the given crate.
 
@@ -189,6 +194,18 @@ pub fn run_core(search_paths: SearchPaths,
 
     let intra_link_resolution_failure_name = lint::builtin::INTRA_DOC_LINK_RESOLUTION_FAILURE.name;
     let warnings_lint_name = lint::builtin::WARNINGS.name;
+    let missing_docs = rustc_lint::builtin::MISSING_DOCS.name;
+
+    // In addition to those specific lints, we also need to whitelist those given through
+    // command line, otherwise they'll get ignored and we don't want that.
+    let mut whitelisted_lints = vec![warnings_lint_name.to_owned(),
+                                     intra_link_resolution_failure_name.to_owned(),
+                                     missing_docs.to_owned()];
+
+    for (lint, _) in &cmd_lints {
+        whitelisted_lints.push(lint.clone());
+    }
+
     let lints = lint::builtin::HardwiredLints.get_lints()
                     .into_iter()
                     .chain(rustc_lint::SoftLints.get_lints().into_iter())
@@ -200,6 +217,7 @@ pub fn run_core(search_paths: SearchPaths,
                             Some((lint.name_lower(), lint::Allow))
                         }
                     })
+                    .chain(cmd_lints.into_iter())
                     .collect::<Vec<_>>();
 
     let host_triple = TargetTriple::from_triple(config::host_triple());
@@ -213,7 +231,7 @@ pub fn run_core(search_paths: SearchPaths,
         } else {
             vec![]
         },
-        lint_cap: Some(lint::Forbid),
+        lint_cap: Some(lint_cap.unwrap_or_else(|| lint::Forbid)),
         cg,
         externs,
         target_triple: triple.unwrap_or(host_triple),
@@ -226,6 +244,7 @@ pub fn run_core(search_paths: SearchPaths,
         },
         error_format,
         edition,
+        describe_lints,
         ..config::basic_options()
     };
     driver::spawn_thread_pool(sessopts, move |sessopts| {
@@ -235,6 +254,24 @@ pub fn run_core(search_paths: SearchPaths,
         let mut sess = session::build_session_(
             sessopts, cpath, diagnostic_handler, codemap,
         );
+
+        lint::builtin::HardwiredLints.get_lints()
+                                     .into_iter()
+                                     .chain(rustc_lint::SoftLints.get_lints().into_iter())
+                                     .filter_map(|lint| {
+                                         // We don't want to whitelist *all* lints so let's
+                                         // ignore those ones.
+                                         if whitelisted_lints.iter().any(|l| &lint.name == l) {
+                                             None
+                                         } else {
+                                             Some(lint)
+                                         }
+                                     })
+                                     .for_each(|l| {
+                                         sess.driver_lint_caps.insert(lint::LintId::of(l),
+                                                                      lint::Allow);
+                                     });
+
         let codegen_backend = rustc_driver::get_codegen_backend(&sess);
         let cstore = Rc::new(CStore::new(codegen_backend.metadata_loader()));
         rustc_lint::register_builtins(&mut sess.lint_store.borrow_mut(), Some(&sess));
@@ -299,7 +336,6 @@ pub fn run_core(search_paths: SearchPaths,
                                                             &sess);
 
         let resolver = RefCell::new(resolver);
-
         abort_on_err(driver::phase_3_run_analysis_passes(&*codegen_backend,
                                                         control,
                                                         &sess,
@@ -326,9 +362,9 @@ pub fn run_core(search_paths: SearchPaths,
             };
 
             let send_trait = if crate_name == Some("core".to_string()) {
-                clean::get_trait_def_id(&tcx, &["marker", "Send"], true)
+                clean::path_to_def_local(&tcx, &["marker", "Send"])
             } else {
-                clean::get_trait_def_id(&tcx, &["core", "marker", "Send"], false)
+                clean::path_to_def(&tcx, &["core", "marker", "Send"])
             };
 
             let ctxt = DocContext {
@@ -349,11 +385,12 @@ pub fn run_core(search_paths: SearchPaths,
                 fake_def_ids: RefCell::new(FxHashMap()),
                 all_fake_def_ids: RefCell::new(FxHashSet()),
                 generated_synthetics: RefCell::new(FxHashSet()),
+                current_item_name: RefCell::new(None),
             };
             debug!("crate: {:?}", tcx.hir.krate());
 
             let krate = {
-                let mut v = RustdocVisitor::new(&*cstore, &ctxt);
+                let mut v = RustdocVisitor::new(&ctxt);
                 v.visit(tcx.hir.krate());
                 v.clean(&ctxt)
             };

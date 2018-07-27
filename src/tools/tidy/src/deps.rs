@@ -47,6 +47,7 @@ static EXCEPTIONS: &'static [&'static str] = &[
     "selectors",          // MPL-2.0, rustdoc
     "clippy_lints",       // MPL-2.0, rls
     "colored",            // MPL-2.0, rustfmt
+    "ordslice",           // Apache-2.0, rls
 ];
 
 /// Which crates to check against the whitelist?
@@ -58,7 +59,6 @@ static WHITELIST_CRATES: &'static [CrateVersion] = &[
 /// Whitelist of crates rustc is allowed to depend on. Avoid adding to the list if possible.
 static WHITELIST: &'static [Crate] = &[
     Crate("aho-corasick"),
-    Crate("ar"),
     Crate("arrayvec"),
     Crate("atty"),
     Crate("backtrace"),
@@ -165,7 +165,7 @@ impl<'a> Crate<'a> {
 impl<'a> CrateVersion<'a> {
     /// Returns the struct and whether or not the dep is in-tree
     pub fn from_str(s: &'a str) -> (Self, bool) {
-        let mut parts = s.split(" ");
+        let mut parts = s.split(' ');
         let name = parts.next().unwrap();
         let version = parts.next().unwrap();
         let path = parts.next().unwrap();

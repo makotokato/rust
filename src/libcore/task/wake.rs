@@ -12,7 +12,8 @@
             reason = "futures in libcore are unstable",
             issue = "50547")]
 
-use fmt;
+use {fmt, mem};
+use marker::Unpin;
 use ptr::NonNull;
 
 /// A `Waker` is a handle for waking up a task by notifying its executor that it
@@ -25,6 +26,7 @@ pub struct Waker {
     inner: NonNull<UnsafeWake>,
 }
 
+impl Unpin for Waker {}
 unsafe impl Send for Waker {}
 unsafe impl Sync for Waker {}
 
@@ -99,6 +101,7 @@ pub struct LocalWaker {
     inner: NonNull<UnsafeWake>,
 }
 
+impl Unpin for LocalWaker {}
 impl !Send for LocalWaker {}
 impl !Sync for LocalWaker {}
 
@@ -110,8 +113,8 @@ impl LocalWaker {
     /// but you otherwise shouldn't call it directly.
     ///
     /// If you're working with the standard library then it's recommended to
-    /// use the `LocalWaker::from` function instead which works with the safe
-    /// `Rc` type and the safe `LocalWake` trait.
+    /// use the `local_waker_from_nonlocal` or `local_waker` to convert a `Waker`
+    /// into a `LocalWaker`.
     ///
     /// For this function to be used safely, it must be sound to call `inner.wake_local()`
     /// on the current thread.
@@ -163,9 +166,10 @@ impl From<LocalWaker> for Waker {
 impl Clone for LocalWaker {
     #[inline]
     fn clone(&self) -> Self {
-        unsafe {
-            LocalWaker { inner: self.inner.as_ref().clone_raw().inner }
-        }
+        let waker = unsafe { self.inner.as_ref().clone_raw() };
+        let inner = waker.inner;
+        mem::forget(waker);
+        LocalWaker { inner }
     }
 }
 
@@ -194,9 +198,7 @@ impl Drop for LocalWaker {
 /// customization.
 ///
 /// When using `std`, a default implementation of the `UnsafeWake` trait is provided for
-/// `Arc<T>` where `T: Wake` and `Rc<T>` where `T: LocalWake`.
-///
-/// Although the methods on `UnsafeWake` take pointers rather than references,
+/// `Arc<T>` where `T: Wake`.
 pub unsafe trait UnsafeWake: Send + Sync {
     /// Creates a clone of this `UnsafeWake` and stores it behind a `Waker`.
     ///

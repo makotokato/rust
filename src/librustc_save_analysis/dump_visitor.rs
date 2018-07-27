@@ -65,14 +65,14 @@ macro_rules! down_cast_data {
 macro_rules! access_from {
     ($save_ctxt:expr, $vis:expr, $id:expr) => {
         Access {
-            public: $vis.node == ast::VisibilityKind::Public,
+            public: $vis.node.is_pub(),
             reachable: $save_ctxt.analysis.access_levels.is_reachable($id),
         }
     };
 
     ($save_ctxt:expr, $item:expr) => {
         Access {
-            public: $item.vis.node == ast::VisibilityKind::Public,
+            public: $item.vis.node.is_pub(),
             reachable: $save_ctxt.analysis.access_levels.is_reachable($item.id),
         }
     };
@@ -316,14 +316,14 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> DumpVisitor<'l, 'tcx, 'll, O> {
         sig: &'l ast::MethodSig,
         body: Option<&'l ast::Block>,
         id: ast::NodeId,
-        name: ast::Ident,
+        ident: ast::Ident,
         generics: &'l ast::Generics,
         vis: ast::Visibility,
         span: Span,
     ) {
-        debug!("process_method: {}:{}", id, name);
+        debug!("process_method: {}:{}", id, ident);
 
-        if let Some(mut method_data) = self.save_ctxt.get_method_data(id, name.name, span) {
+        if let Some(mut method_data) = self.save_ctxt.get_method_data(id, ident.name, span) {
             let sig_str = ::make_signature(&sig.decl, &generics);
             if body.is_some() {
                 self.nest_tables(
@@ -335,7 +335,7 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> DumpVisitor<'l, 'tcx, 'll, O> {
             self.process_generic_params(&generics, span, &method_data.qualname, id);
 
             method_data.value = sig_str;
-            method_data.sig = sig::method_signature(id, name, generics, sig, &self.save_ctxt);
+            method_data.sig = sig::method_signature(id, ident, generics, sig, &self.save_ctxt);
             self.dumper.dump_def(&access_from!(self.save_ctxt, vis, id), method_data);
         }
 
@@ -523,7 +523,7 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> DumpVisitor<'l, 'tcx, 'll, O> {
                     .iter()
                     .enumerate()
                     .filter_map(|(i, f)| {
-                        if include_priv_fields || f.vis.node == ast::VisibilityKind::Public {
+                        if include_priv_fields || f.vis.node.is_pub() {
                             f.ident
                                 .map(|i| i.to_string())
                                 .or_else(|| Some(i.to_string()))
@@ -1238,6 +1238,16 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> DumpVisitor<'l, 'tcx, 'll, O> {
                 // trait.
                 self.visit_ty(ty)
             }
+            ast::ImplItemKind::Existential(ref bounds) => {
+                // FIXME uses of the assoc type should ideally point to this
+                // 'def' and the name here should be a ref to the def in the
+                // trait.
+                for bound in bounds.iter() {
+                    if let ast::GenericBound::Trait(trait_ref, _) = bound {
+                        self.process_path(trait_ref.trait_ref.ref_id, &trait_ref.trait_ref.path)
+                    }
+                }
+            }
             ast::ImplItemKind::Macro(_) => {}
         }
     }
@@ -1475,6 +1485,36 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> Visitor<'l> for DumpVisitor<'l, 'tc
                 }
 
                 self.visit_ty(&ty);
+                self.process_generic_params(ty_params, item.span, &qualname, item.id);
+            }
+            Existential(ref _bounds, ref ty_params) => {
+                let qualname = format!("::{}", self.tcx.node_path_str(item.id));
+                // FIXME do something with _bounds
+                let value = String::new();
+                let sub_span = self.span.sub_span_after_keyword(item.span, keywords::Type);
+                if !self.span.filter_generated(sub_span, item.span) {
+                    let span = self.span_from_span(sub_span.expect("No span found for typedef"));
+                    let id = ::id_from_node_id(item.id, &self.save_ctxt);
+
+                    self.dumper.dump_def(
+                        &access_from!(self.save_ctxt, item),
+                        Def {
+                            kind: DefKind::Type,
+                            id,
+                            span,
+                            name: item.ident.to_string(),
+                            qualname: qualname.clone(),
+                            value,
+                            parent: None,
+                            children: vec![],
+                            decl_id: None,
+                            docs: self.save_ctxt.docs_for_attrs(&item.attrs),
+                            sig: sig::item_signature(item, &self.save_ctxt),
+                            attributes: lower_attributes(item.attrs.clone(), &self.save_ctxt),
+                        },
+                    );
+                }
+
                 self.process_generic_params(ty_params, item.span, &qualname, item.id);
             }
             Mac(_) => (),

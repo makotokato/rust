@@ -24,7 +24,7 @@ use syntax::errors::DiagnosticBuilder;
 use syntax::ext::base::{self, Annotatable, Determinacy, MultiModifier, MultiDecorator};
 use syntax::ext::base::{MacroKind, SyntaxExtension, Resolver as SyntaxResolver};
 use syntax::ext::expand::{self, AstFragment, AstFragmentKind, Invocation, InvocationKind};
-use syntax::ext::hygiene::{self, Mark, Transparency};
+use syntax::ext::hygiene::{self, Mark};
 use syntax::ext::placeholders::placeholder;
 use syntax::ext::tt::macro_rules;
 use syntax::feature_gate::{self, emit_feature_err, GateIssue};
@@ -155,10 +155,9 @@ impl<'a> base::Resolver for Resolver<'a> {
                     }
                 });
 
-                let ident = path.segments[0].ident;
-                if ident.name == keywords::DollarCrate.name() {
+                if path.segments[0].ident.name == keywords::DollarCrate.name() {
+                    let module = self.0.resolve_crate_root(path.segments[0].ident);
                     path.segments[0].ident.name = keywords::CrateRoot.name();
-                    let module = self.0.resolve_crate_root(ident.span.ctxt(), true);
                     if !module.is_local() {
                         let span = path.segments[0].ident.span;
                         path.segments.insert(1, match module.kind {
@@ -221,7 +220,7 @@ impl<'a> base::Resolver for Resolver<'a> {
             vis: ty::Visibility::Invisible,
             expansion: Mark::root(),
         });
-        self.global_macros.insert(ident.name, binding);
+        self.macro_prelude.insert(ident.name, binding);
     }
 
     fn resolve_imports(&mut self) {
@@ -239,7 +238,7 @@ impl<'a> base::Resolver for Resolver<'a> {
                 attr::mark_known(&attrs[i]);
             }
 
-            match self.global_macros.get(&name).cloned() {
+            match self.macro_prelude.get(&name).cloned() {
                 Some(binding) => match *binding.get_macro(self) {
                     MultiModifier(..) | MultiDecorator(..) | SyntaxExtension::AttrProcMacro(..) => {
                         return Some(attrs.remove(i))
@@ -275,7 +274,7 @@ impl<'a> base::Resolver for Resolver<'a> {
                     }
                     let trait_name = traits[j].segments[0].ident.name;
                     let legacy_name = Symbol::intern(&format!("derive_{}", trait_name));
-                    if !self.global_macros.contains_key(&legacy_name) {
+                    if !self.macro_prelude.contains_key(&legacy_name) {
                         continue
                     }
                     let span = traits.remove(j).span;
@@ -322,6 +321,10 @@ impl<'a> base::Resolver for Resolver<'a> {
             InvocationKind::Attr { attr: None, .. } => return Ok(None),
             _ => self.resolve_invoc_to_def(invoc, scope, force)?,
         };
+        if let Def::Macro(_, MacroKind::ProcMacroStub) = def {
+            self.report_proc_macro_stub(invoc.span());
+            return Err(Determinacy::Determined);
+        }
         let def_id = def.def_id();
 
         self.macro_defs.insert(invoc.expansion_data.mark, def_id);
@@ -332,27 +335,28 @@ impl<'a> base::Resolver for Resolver<'a> {
 
         self.unused_macros.remove(&def_id);
         let ext = self.get_macro(def);
-        if ext.is_modern() {
-            invoc.expansion_data.mark.set_transparency(Transparency::Opaque);
-        } else if def_id.krate == BUILTIN_MACROS_CRATE {
-            invoc.expansion_data.mark.set_is_builtin(true);
-        }
+        invoc.expansion_data.mark.set_default_transparency(ext.default_transparency());
+        invoc.expansion_data.mark.set_is_builtin(def_id.krate == BUILTIN_MACROS_CRATE);
         Ok(Some(ext))
     }
 
     fn resolve_macro(&mut self, scope: Mark, path: &ast::Path, kind: MacroKind, force: bool)
                      -> Result<Lrc<SyntaxExtension>, Determinacy> {
-        self.resolve_macro_to_def(scope, path, kind, force).map(|def| {
+        self.resolve_macro_to_def(scope, path, kind, force).and_then(|def| {
+            if let Def::Macro(_, MacroKind::ProcMacroStub) = def {
+                self.report_proc_macro_stub(path.span);
+                return Err(Determinacy::Determined);
+            }
             self.unused_macros.remove(&def.def_id());
-            self.get_macro(def)
+            Ok(self.get_macro(def))
         })
     }
 
     fn check_unused_macros(&self) {
         for did in self.unused_macros.iter() {
             let id_span = match *self.macro_map[did] {
-                SyntaxExtension::NormalTT { def_info, .. } => def_info,
-                SyntaxExtension::DeclMacro(.., osp, _) => osp,
+                SyntaxExtension::NormalTT { def_info, .. } |
+                SyntaxExtension::DeclMacro { def_info, .. } => def_info,
                 _ => None,
             };
             if let Some((id, span)) = id_span {
@@ -367,6 +371,11 @@ impl<'a> base::Resolver for Resolver<'a> {
 }
 
 impl<'a> Resolver<'a> {
+    fn report_proc_macro_stub(&self, span: Span) {
+        self.session.span_err(span,
+                              "can't use a procedural macro from the same crate that defines it");
+    }
+
     fn resolve_invoc_to_def(&mut self, invoc: &mut Invocation, scope: Mark, force: bool)
                             -> Result<Def, Determinacy> {
         let (attr, traits, item) = match invoc.kind {
@@ -389,6 +398,22 @@ impl<'a> Resolver<'a> {
             Err(Determinacy::Determined) => {}
         }
 
+        // Ok at this point we've determined that the `attr` above doesn't
+        // actually resolve at this time, so we may want to report an error.
+        // It could be the case, though, that `attr` won't ever resolve! If
+        // there's a custom derive that could be used it might declare `attr` as
+        // a custom attribute accepted by the derive. In this case we don't want
+        // to report this particular invocation as unresolved, but rather we'd
+        // want to move on to the next invocation.
+        //
+        // This loop here looks through all of the derive annotations in scope
+        // and tries to resolve them. If they themselves successfully resolve
+        // *and* the resolve mentions that this attribute's name is a registered
+        // custom attribute then we flag this attribute as known and update
+        // `invoc` above to point to the next invocation.
+        //
+        // By then returning `Undetermined` we should continue resolution to
+        // resolve the next attribute.
         let attr_name = match path.segments.len() {
             1 => path.segments[0].ident.name,
             _ => return Err(determinacy),
@@ -404,14 +429,14 @@ impl<'a> Resolver<'a> {
                         *item = mem::replace(item, dummy_item).map_attrs(|mut attrs| {
                             let inert_attr = attr.take().unwrap();
                             attr::mark_known(&inert_attr);
-                            if self.proc_macro_enabled {
+                            if self.use_extern_macros {
                                 *attr = expand::find_attr_invoc(&mut attrs);
                             }
                             attrs.push(inert_attr);
                             attrs
                         });
+                        return Err(Determinacy::Undetermined)
                     }
-                    return Err(Determinacy::Undetermined);
                 },
                 Err(Determinacy::Undetermined) => determinacy = Determinacy::Undetermined,
                 Err(Determinacy::Determined) => {}
@@ -540,7 +565,7 @@ impl<'a> Resolver<'a> {
                     module, ident, ns, true, record_used, path_span,
                 ).map(MacroBinding::Modern)
             } else {
-                self.global_macros.get(&ident.name).cloned().ok_or(determinacy)
+                self.macro_prelude.get(&ident.name).cloned().ok_or(determinacy)
                     .map(MacroBinding::Global)
             };
             self.current_module = orig_current_module;
@@ -563,8 +588,7 @@ impl<'a> Resolver<'a> {
                             return potential_illegal_shadower;
                         }
                     }
-                    if binding.expansion != Mark::root() ||
-                       (binding.is_glob_import() && module.unwrap().def().is_some()) {
+                    if binding.is_glob_import() || binding.expansion != Mark::root() {
                         potential_illegal_shadower = result;
                     } else {
                         return result;
@@ -627,7 +651,7 @@ impl<'a> Resolver<'a> {
 
         let binding = if let Some(binding) = binding {
             MacroBinding::Legacy(binding)
-        } else if let Some(binding) = self.global_macros.get(&ident.name).cloned() {
+        } else if let Some(binding) = self.macro_prelude.get(&ident.name).cloned() {
             if !self.use_extern_macros {
                 self.record_use(ident, MacroNS, binding, DUMMY_SP);
             }
@@ -737,8 +761,8 @@ impl<'a> Resolver<'a> {
         // Then check global macros.
         }.or_else(|| {
             // FIXME: get_macro needs an &mut Resolver, can we do it without cloning?
-            let global_macros = self.global_macros.clone();
-            let names = global_macros.iter().filter_map(|(name, binding)| {
+            let macro_prelude = self.macro_prelude.clone();
+            let names = macro_prelude.iter().filter_map(|(name, binding)| {
                 if binding.get_macro(self).kind() == kind {
                     Some(name)
                 } else {
@@ -849,8 +873,6 @@ impl<'a> Resolver<'a> {
     /// Error if `ext` is a Macros 1.1 procedural macro being imported by `#[macro_use]`
     fn err_if_macro_use_proc_macro(&mut self, name: Name, use_span: Span,
                                    binding: &NameBinding<'a>) {
-        use self::SyntaxExtension::*;
-
         let krate = binding.def().def_id().krate;
 
         // Plugin-based syntax extensions are exempt from this check
@@ -860,15 +882,16 @@ impl<'a> Resolver<'a> {
 
         match *ext {
             // If `ext` is a procedural macro, check if we've already warned about it
-            AttrProcMacro(..) | ProcMacro(..) =>
+            SyntaxExtension::AttrProcMacro(..) | SyntaxExtension::ProcMacro { .. } =>
                 if !self.warned_proc_macros.insert(name) { return; },
             _ => return,
         }
 
         let warn_msg = match *ext {
-            AttrProcMacro(..) => "attribute procedural macros cannot be \
-                                  imported with `#[macro_use]`",
-            ProcMacro(..) => "procedural macros cannot be imported with `#[macro_use]`",
+            SyntaxExtension::AttrProcMacro(..) =>
+                "attribute procedural macros cannot be imported with `#[macro_use]`",
+            SyntaxExtension::ProcMacro { .. } =>
+                "procedural macros cannot be imported with `#[macro_use]`",
             _ => return,
         };
 

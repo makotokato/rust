@@ -57,6 +57,7 @@ use errors::ColorConfig;
 use std::collections::{BTreeMap, BTreeSet};
 use std::default::Default;
 use std::env;
+use std::panic;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::mpsc::channel;
@@ -68,6 +69,7 @@ use rustc::session::search_paths::SearchPaths;
 use rustc::session::config::{ErrorOutputType, RustcOptGroup, Externs, CodegenOptions};
 use rustc::session::config::{nightly_options, build_codegen_options};
 use rustc_target::spec::TargetTriple;
+use rustc::session::config::get_cmd_lint_options;
 
 #[macro_use]
 pub mod externalfiles;
@@ -88,7 +90,6 @@ pub mod html {
 }
 pub mod markdown;
 pub mod passes;
-pub mod plugins;
 pub mod visit_ast;
 pub mod visit_lib;
 pub mod test;
@@ -114,7 +115,7 @@ pub fn main() {
         syntax::with_globals(move || {
             get_args().map(|args| main_args(&args)).unwrap_or(1)
         })
-    }).unwrap().join().unwrap_or(101);
+    }).unwrap().join().unwrap_or(rustc_driver::EXIT_FAILURE);
     process::exit(res as i32);
 }
 
@@ -164,7 +165,7 @@ pub fn opts() -> Vec<RustcOptGroup> {
             o.optmulti("", "extern", "pass an --extern to rustc", "NAME=PATH")
         }),
         stable("plugin-path", |o| {
-            o.optmulti("", "plugin-path", "directory to load plugins from", "DIR")
+            o.optmulti("", "plugin-path", "removed", "DIR")
         }),
         stable("C", |o| {
             o.optmulti("C", "codegen", "pass a codegen option to rustc", "OPT[=VALUE]")
@@ -177,7 +178,7 @@ pub fn opts() -> Vec<RustcOptGroup> {
                        "PASSES")
         }),
         stable("plugins", |o| {
-            o.optmulti("", "plugins", "space separated list of plugins to also load",
+            o.optmulti("", "plugins", "removed",
                        "PLUGINS")
         }),
         stable("no-default", |o| {
@@ -307,6 +308,28 @@ pub fn opts() -> Vec<RustcOptGroup> {
              o.optflag("",
                        "disable-minification",
                        "Disable minification applied on JS files")
+        }),
+        stable("warn", |o| {
+            o.optmulti("W", "warn", "Set lint warnings", "OPT")
+        }),
+        stable("allow", |o| {
+            o.optmulti("A", "allow", "Set lint allowed", "OPT")
+        }),
+        stable("deny", |o| {
+            o.optmulti("D", "deny", "Set lint denied", "OPT")
+        }),
+        stable("forbid", |o| {
+            o.optmulti("F", "forbid", "Set lint forbidden", "OPT")
+        }),
+        stable("cap-lints", |o| {
+            o.optmulti(
+                "",
+                "cap-lints",
+                "Set the most restrictive lint level. \
+                 More restrictive lints are capped at this \
+                 level. By default, it is at `forbid` level.",
+                "LEVEL",
+            )
         }),
     ]
 }
@@ -640,15 +663,18 @@ where R: 'static + Send,
         *x == "force-unstable-if-unmarked"
     });
 
+    let (lint_opts, describe_lints, lint_cap) = get_cmd_lint_options(matches, error_format);
+
     let (tx, rx) = channel();
 
-    rustc_driver::monitor(move || syntax::with_globals(move || {
+    let result = rustc_driver::monitor(move || syntax::with_globals(move || {
         use rustc::session::config::Input;
 
         let (mut krate, renderinfo) =
             core::run_core(paths, cfgs, externs, Input::File(cratefile), triple, maybe_sysroot,
                            display_warnings, crate_name.clone(),
-                           force_unstable_if_unmarked, edition, cg, error_format);
+                           force_unstable_if_unmarked, edition, cg, error_format,
+                           lint_opts, lint_cap, describe_lints);
 
         info!("finished with rustc");
 
@@ -715,34 +741,38 @@ where R: 'static + Send,
             }
         }
 
-        // Load all plugins/passes into a PluginManager
-        let path = plugin_path.unwrap_or("/tmp/rustdoc/plugins".to_string());
-        let mut pm = plugins::PluginManager::new(PathBuf::from(path));
+        if !plugins.is_empty() {
+            eprintln!("WARNING: --plugins no longer functions; see CVE-2018-1000622");
+        }
+
+        if !plugin_path.is_none() {
+            eprintln!("WARNING: --plugin-path no longer functions; see CVE-2018-1000622");
+        }
+
+        info!("Executing passes");
+
         for pass in &passes {
-            let plugin = match passes::PASSES.iter()
-                                             .position(|&(p, ..)| {
-                                                 p == *pass
-                                             }) {
-                Some(i) => passes::PASSES[i].1,
+            // determine if we know about this pass
+            let pass = match passes::PASSES.iter().find(|(p, ..)| p == pass) {
+                Some(pass) => pass.1,
                 None => {
                     error!("unknown pass {}, skipping", *pass);
+
                     continue
                 },
             };
-            pm.add_plugin(plugin);
-        }
-        info!("loading plugins...");
-        for pname in plugins {
-            pm.load_plugin(pname);
-        }
 
-        // Run everything!
-        info!("Executing passes/plugins");
-        let krate = pm.run_plugins(krate);
+            // run it
+            krate = pass(krate);
+        }
 
         tx.send(f(Output { krate: krate, renderinfo: renderinfo, passes: passes })).unwrap();
     }));
-    rx.recv().unwrap()
+
+    match result {
+        Ok(()) => rx.recv().unwrap(),
+        Err(_) => panic::resume_unwind(Box::new(errors::FatalErrorMarker)),
+    }
 }
 
 /// Prints deprecation warnings for deprecated options
@@ -750,8 +780,6 @@ fn check_deprecated_options(matches: &getopts::Matches, diag: &errors::Handler) 
     let deprecated_flags = [
        "input-format",
        "output-format",
-       "plugin-path",
-       "plugins",
        "no-defaults",
        "passes",
     ];

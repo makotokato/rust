@@ -44,8 +44,10 @@ macro_rules! ast_fragments {
     (
         $($Kind:ident($AstTy:ty) {
             $kind_name:expr;
-            $(one fn $fold_ast:ident; fn $visit_ast:ident;)?
-            $(many fn $fold_ast_elt:ident; fn $visit_ast_elt:ident;)?
+            // FIXME: HACK: this should be `$(one ...)?` and `$(many ...)?` but `?` macro
+            // repetition was removed from 2015 edition in #51587 because of ambiguities.
+            $(one fn $fold_ast:ident; fn $visit_ast:ident;)*
+            $(many fn $fold_ast_elt:ident; fn $visit_ast_elt:ident;)*
             fn $make_ast:ident;
         })*
     ) => {
@@ -71,7 +73,7 @@ macro_rules! ast_fragments {
                 }
             }
 
-            fn make_from<'a>(self, result: Box<MacResult + 'a>) -> Option<AstFragment> {
+            fn make_from<'a>(self, result: Box<dyn MacResult + 'a>) -> Option<AstFragment> {
                 match self {
                     AstFragmentKind::OptExpr =>
                         result.make_expr().map(Some).map(AstFragment::OptExpr),
@@ -100,11 +102,11 @@ macro_rules! ast_fragments {
                     AstFragment::OptExpr(expr) =>
                         AstFragment::OptExpr(expr.and_then(|expr| folder.fold_opt_expr(expr))),
                     $($(AstFragment::$Kind(ast) =>
-                        AstFragment::$Kind(folder.$fold_ast(ast)),)?)*
+                        AstFragment::$Kind(folder.$fold_ast(ast)),)*)*
                     $($(AstFragment::$Kind(ast) =>
                         AstFragment::$Kind(ast.into_iter()
                                               .flat_map(|ast| folder.$fold_ast_elt(ast))
-                                              .collect()),)?)*
+                                              .collect()),)*)*
                 }
             }
 
@@ -112,10 +114,10 @@ macro_rules! ast_fragments {
                 match *self {
                     AstFragment::OptExpr(Some(ref expr)) => visitor.visit_expr(expr),
                     AstFragment::OptExpr(None) => {}
-                    $($(AstFragment::$Kind(ref ast) => visitor.$visit_ast(ast),)?)*
+                    $($(AstFragment::$Kind(ref ast) => visitor.$visit_ast(ast),)*)*
                     $($(AstFragment::$Kind(ref ast) => for ast_elt in &ast[..] {
                         visitor.$visit_ast_elt(ast_elt);
-                    })?)*
+                    })*)*
                 }
             }
         }
@@ -126,10 +128,10 @@ macro_rules! ast_fragments {
             }
             $($(fn $fold_ast(&mut self, ast: $AstTy) -> $AstTy {
                 self.expand_fragment(AstFragment::$Kind(ast)).$make_ast()
-            })?)*
+            })*)*
             $($(fn $fold_ast_elt(&mut self, ast_elt: <$AstTy as IntoIterator>::Item) -> $AstTy {
                 self.expand_fragment(AstFragment::$Kind(SmallVector::one(ast_elt))).$make_ast()
-            })?)*
+            })*)*
         }
 
         impl<'a> MacResult for ::ext::tt::macro_rules::ParserAnyMacro<'a> {
@@ -232,12 +234,19 @@ pub enum InvocationKind {
 }
 
 impl Invocation {
-    fn span(&self) -> Span {
+    pub fn span(&self) -> Span {
         match self.kind {
             InvocationKind::Bang { span, .. } => span,
             InvocationKind::Attr { attr: Some(ref attr), .. } => attr.span,
             InvocationKind::Attr { attr: None, .. } => DUMMY_SP,
             InvocationKind::Derive { ref path, .. } => path.span,
+        }
+    }
+
+    pub fn attr_id(&self) -> Option<ast::AttrId> {
+        match self.kind {
+            InvocationKind::Attr { attr: Some(ref attr), .. } => Some(attr.id),
+            _ => None,
         }
     }
 }
@@ -331,10 +340,20 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
 
             let scope =
                 if self.monotonic { invoc.expansion_data.mark } else { orig_expansion_data.mark };
+            let attr_id_before = invoc.attr_id();
             let ext = match self.cx.resolver.resolve_invoc(&mut invoc, scope, force) {
                 Ok(ext) => Some(ext),
                 Err(Determinacy::Determined) => None,
                 Err(Determinacy::Undetermined) => {
+                    // Sometimes attributes which we thought were invocations
+                    // end up being custom attributes for custom derives. If
+                    // that's the case our `invoc` will have changed out from
+                    // under us. If this is the case we're making progress so we
+                    // want to flag it as such, and we test this by looking if
+                    // the `attr_id()` method has been changing over time.
+                    if invoc.attr_id() != attr_id_before {
+                        progress = true;
+                    }
                     undetermined_invocations.push(invoc);
                     continue
                 }
@@ -738,13 +757,13 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
         };
 
         let opt_expanded = match *ext {
-            DeclMacro(ref expand, def_span, edition) => {
-                if let Err(dummy_span) = validate_and_set_expn_info(self, def_span.map(|(_, s)| s),
+            DeclMacro { ref expander, def_info, edition, .. } => {
+                if let Err(dummy_span) = validate_and_set_expn_info(self, def_info.map(|(_, s)| s),
                                                                     false, false, false, None,
                                                                     edition) {
                     dummy_span
                 } else {
-                    kind.make_from(expand.expand(self.cx, span, mac.node.stream()))
+                    kind.make_from(expander.expand(self.cx, span, mac.node.stream()))
                 }
             }
 
@@ -804,7 +823,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                 kind.dummy(span)
             }
 
-            ProcMacro(ref expandfun, allow_internal_unstable, edition) => {
+            SyntaxExtension::ProcMacro { ref expander, allow_internal_unstable, edition } => {
                 if ident.name != keywords::Invalid.name() {
                     let msg =
                         format!("macro {}! expects no ident argument, given '{}'", path, ident);
@@ -826,7 +845,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                         edition,
                     });
 
-                    let tok_result = expandfun.expand(self.cx, span, mac.node.stream());
+                    let tok_result = expander.expand(self.cx, span, mac.node.stream());
                     let result = self.parse_ast_fragment(tok_result, kind, path, span);
                     self.gate_proc_macro_expansion(span, &result);
                     result
@@ -1073,7 +1092,7 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
                 return attrs;
             }
 
-            if self.cx.ecfg.proc_macro_enabled() {
+            if self.cx.ecfg.use_extern_macros_enabled() {
                 attr = find_attr_invoc(&mut attrs);
             }
             traits = collect_derives(&mut self.cx, &mut attrs);
@@ -1096,7 +1115,7 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
                 return attrs;
             }
 
-            if self.cx.ecfg.proc_macro_enabled() {
+            if self.cx.ecfg.use_extern_macros_enabled() {
                 attr = find_attr_invoc(&mut attrs);
             }
             attrs
@@ -1297,7 +1316,7 @@ impl<'a, 'b> Folder for InvocationCollector<'a, 'b> {
                 // Detect if this is an inline module (`mod m { ... }` as opposed to `mod m;`).
                 // In the non-inline case, `inner` is never the dummy span (c.f. `parse_item_mod`).
                 // Thus, if `inner` is the dummy span, we know the module is inline.
-                let inline_module = item.span.contains(inner) || inner == DUMMY_SP;
+                let inline_module = item.span.contains(inner) || inner.is_dummy();
 
                 if inline_module {
                     if let Some(path) = attr::first_attr_value_str_by_name(&item.attrs, "path") {
@@ -1406,7 +1425,7 @@ impl<'a, 'b> Folder for InvocationCollector<'a, 'b> {
                          foreign_item: ast::ForeignItem) -> SmallVector<ast::ForeignItem> {
         let (attr, traits, foreign_item) = self.classify_item(foreign_item);
 
-        let explain = if self.cx.ecfg.proc_macro_enabled() {
+        let explain = if self.cx.ecfg.use_extern_macros_enabled() {
             feature_gate::EXPLAIN_PROC_MACROS_IN_EXTERN
         } else {
             feature_gate::EXPLAIN_MACROS_IN_EXTERN
@@ -1495,9 +1514,11 @@ impl<'a, 'b> Folder for InvocationCollector<'a, 'b> {
 
                     match String::from_utf8(buf) {
                         Ok(src) => {
+                            let src_interned = Symbol::intern(&src);
+
                             // Add this input file to the code map to make it available as
                             // dependency information
-                            self.cx.codemap().new_filemap_and_lines(&filename, &src);
+                            self.cx.codemap().new_filemap(filename.into(), src);
 
                             let include_info = vec![
                                 dummy_spanned(ast::NestedMetaItemKind::MetaItem(
@@ -1505,7 +1526,7 @@ impl<'a, 'b> Folder for InvocationCollector<'a, 'b> {
                                                                      dummy_spanned(file)))),
                                 dummy_spanned(ast::NestedMetaItemKind::MetaItem(
                                         attr::mk_name_value_item_str(Ident::from_str("contents"),
-                                                            dummy_spanned(Symbol::intern(&src))))),
+                                                            dummy_spanned(src_interned)))),
                             ];
 
                             let include_ident = Ident::from_str("include");
@@ -1590,7 +1611,8 @@ impl<'feat> ExpansionConfig<'feat> {
         fn enable_trace_macros = trace_macros,
         fn enable_allow_internal_unstable = allow_internal_unstable,
         fn enable_custom_derive = custom_derive,
-        fn proc_macro_enabled = proc_macro,
+        fn enable_format_args_nl = format_args_nl,
+        fn use_extern_macros_enabled = use_extern_macros,
         fn macros_in_extern_enabled = macros_in_extern,
         fn proc_macro_mod = proc_macro_mod,
         fn proc_macro_gen = proc_macro_gen,

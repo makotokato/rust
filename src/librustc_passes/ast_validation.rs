@@ -60,19 +60,21 @@ impl<'a> AstValidator<'a> {
     }
 
     fn invalid_visibility(&self, vis: &Visibility, note: Option<&str>) {
-        if vis.node != VisibilityKind::Inherited {
-            let mut err = struct_span_err!(self.session,
-                                           vis.span,
-                                           E0449,
-                                           "unnecessary visibility qualifier");
-            if vis.node == VisibilityKind::Public {
-                err.span_label(vis.span, "`pub` not permitted here because it's implied");
-            }
-            if let Some(note) = note {
-                err.note(note);
-            }
-            err.emit();
+        if let VisibilityKind::Inherited = vis.node {
+            return
         }
+
+        let mut err = struct_span_err!(self.session,
+                                        vis.span,
+                                        E0449,
+                                        "unnecessary visibility qualifier");
+        if vis.node.is_pub() {
+            err.span_label(vis.span, "`pub` not permitted here because it's implied");
+        }
+        if let Some(note) = note {
+            err.note(note);
+        }
+        err.emit();
     }
 
     fn check_decl_no_pat<ReportFn: Fn(Span, bool)>(&self, decl: &FnDecl, report_err: ReportFn) {
@@ -172,12 +174,27 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
             ExprKind::InlineAsm(..) if !self.session.target.target.options.allow_asm => {
                 span_err!(self.session, expr.span, E0472, "asm! is unsupported on this target");
             }
-            ExprKind::ObsoleteInPlace(..) => {
-                self.err_handler()
-                    .struct_span_err(expr.span, "emplacement syntax is obsolete (for now, anyway)")
-                    .note("for more information, see \
-                           <https://github.com/rust-lang/rust/issues/27779#issuecomment-378416911>")
-                    .emit();
+            ExprKind::ObsoleteInPlace(ref place, ref val) => {
+                let mut err = self.err_handler().struct_span_err(
+                    expr.span,
+                    "emplacement syntax is obsolete (for now, anyway)",
+                );
+                err.note(
+                    "for more information, see \
+                     <https://github.com/rust-lang/rust/issues/27779#issuecomment-378416911>"
+                );
+                match val.node {
+                    ExprKind::Lit(ref v) if v.node.is_numeric() => {
+                        err.span_suggestion(
+                            place.span.between(val.span),
+                            "if you meant to write a comparison against a negative value, add a \
+                             space in between `<` and `-`",
+                            "< -".to_string(),
+                        );
+                    }
+                    _ => {}
+                }
+                err.emit();
             }
             _ => {}
         }
@@ -208,7 +225,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
                 }
                 self.no_questions_in_bounds(bounds, "trait object types", false);
             }
-            TyKind::ImplTrait(ref bounds) => {
+            TyKind::ImplTrait(_, ref bounds) => {
                 if !bounds.iter()
                           .any(|b| if let GenericBound::Trait(..) = *b { true } else { false }) {
                     self.err_handler().span_err(ty.span, "at least one trait must be specified");
@@ -253,7 +270,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
         match item.node {
             ItemKind::Impl(unsafety, polarity, _, _, Some(..), ref ty, ref impl_items) => {
                 self.invalid_visibility(&item.vis, None);
-                if ty.node == TyKind::Err {
+                if let TyKind::Err = ty.node {
                     self.err_handler()
                         .struct_span_err(item.span, "`impl Trait for .. {}` is an obsolete syntax")
                         .help("use `auto trait Trait {}` instead").emit();
@@ -505,7 +522,7 @@ impl<'a> NestedImplTraitVisitor<'a> {
 
 impl<'a> Visitor<'a> for NestedImplTraitVisitor<'a> {
     fn visit_ty(&mut self, t: &'a Ty) {
-        if let TyKind::ImplTrait(_) = t.node {
+        if let TyKind::ImplTrait(..) = t.node {
             if let Some(outer_impl_trait) = self.outer_impl_trait {
                 struct_span_err!(self.session, t.span, E0666,
                                  "nested `impl Trait` is not allowed")
@@ -570,7 +587,7 @@ impl<'a> ImplTraitProjectionVisitor<'a> {
 impl<'a> Visitor<'a> for ImplTraitProjectionVisitor<'a> {
     fn visit_ty(&mut self, t: &'a Ty) {
         match t.node {
-            TyKind::ImplTrait(_) => {
+            TyKind::ImplTrait(..) => {
                 if self.is_banned {
                     struct_span_err!(self.session, t.span, E0667,
                                  "`impl Trait` is not allowed in path parameters")

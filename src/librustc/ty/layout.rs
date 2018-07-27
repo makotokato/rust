@@ -1020,13 +1020,8 @@ impl<'a, 'tcx> LayoutCx<'tcx, TyCtxt<'a, 'tcx, 'tcx>> {
                 let mut abi = Abi::Aggregate { sized: true };
                 if tag.value.size(dl) == size {
                     abi = Abi::Scalar(tag.clone());
-                } else if !tag.is_bool() {
-                    // HACK(nox): Blindly using ScalarPair for all tagged enums
-                    // where applicable leads to Option<u8> being handled as {i1, i8},
-                    // which later confuses SROA and some loop optimisations,
-                    // ultimately leading to the repeat-trusted-len test
-                    // failing. We make the trade-off of using ScalarPair only
-                    // for types where the tag isn't a boolean.
+                } else {
+                    // Try to use a ScalarPair for all tagged enums.
                     let mut common_prim = None;
                     for (field_layouts, layout_variant) in variants.iter().zip(&layout_variants) {
                         let offsets = match layout_variant.fields {
@@ -1115,11 +1110,11 @@ impl<'a, 'tcx> LayoutCx<'tcx, TyCtxt<'a, 'tcx, 'tcx>> {
                 }
                 tcx.layout_raw(param_env.and(normalized))?
             }
-            ty::TyParam(_) => {
-                return Err(LayoutError::Unknown(ty));
-            }
-            ty::TyGeneratorWitness(..) | ty::TyInfer(_) | ty::TyError => {
+            ty::TyGeneratorWitness(..) | ty::TyInfer(_) => {
                 bug!("LayoutDetails::compute: unexpected type `{}`", ty)
+            }
+            ty::TyParam(_) | ty::TyError => {
+                return Err(LayoutError::Unknown(ty));
             }
         })
     }

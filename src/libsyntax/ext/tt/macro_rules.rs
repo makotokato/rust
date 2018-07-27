@@ -73,7 +73,7 @@ impl TTMacroExpander for MacroRulesMacroExpander {
                    cx: &'cx mut ExtCtxt,
                    sp: Span,
                    input: TokenStream)
-                   -> Box<MacResult+'cx> {
+                   -> Box<dyn MacResult+'cx> {
         if !self.valid {
             return DummyResult::any(sp);
         }
@@ -99,7 +99,7 @@ fn generic_extension<'cx>(cx: &'cx mut ExtCtxt,
                           arg: TokenStream,
                           lhses: &[quoted::TokenTree],
                           rhses: &[quoted::TokenTree])
-                          -> Box<MacResult+'cx> {
+                          -> Box<dyn MacResult+'cx> {
     if cx.trace_macros() {
         trace_macros_note(cx, sp, format!("expanding `{}! {{ {} }}`", name, arg));
     }
@@ -240,8 +240,17 @@ pub fn compile(sess: &ParseSess, features: &Features, def: &ast::Item, edition: 
             s.iter().map(|m| {
                 if let MatchedNonterminal(ref nt) = *m {
                     if let NtTT(ref tt) = **nt {
-                        let tt = quoted::parse(tt.clone().into(), true, sess, features, &def.attrs)
-                            .pop().unwrap();
+                        let tt = quoted::parse(
+                            tt.clone().into(),
+                            true,
+                            sess,
+                            features,
+                            &def.attrs,
+                            edition,
+                            def.id,
+                        )
+                        .pop()
+                        .unwrap();
                         valid &= check_lhs_nt_follows(sess, features, &def.attrs, &tt);
                         return tt;
                     }
@@ -257,8 +266,16 @@ pub fn compile(sess: &ParseSess, features: &Features, def: &ast::Item, edition: 
             s.iter().map(|m| {
                 if let MatchedNonterminal(ref nt) = *m {
                     if let NtTT(ref tt) = **nt {
-                        return quoted::parse(tt.clone().into(), false, sess, features, &def.attrs)
-                            .pop().unwrap();
+                        return quoted::parse(
+                            tt.clone().into(),
+                            false,
+                            sess,
+                            features,
+                            &def.attrs,
+                            edition,
+                            def.id,
+                        ).pop()
+                         .unwrap();
                     }
                 }
                 sess.span_diagnostic.span_bug(def.span, "wrong-structured lhs")
@@ -312,7 +329,14 @@ pub fn compile(sess: &ParseSess, features: &Features, def: &ast::Item, edition: 
             edition,
         }
     } else {
-        SyntaxExtension::DeclMacro(expander, Some((def.id, def.span)), edition)
+        let is_transparent = attr::contains_name(&def.attrs, "rustc_transparent_macro");
+
+        SyntaxExtension::DeclMacro {
+            expander,
+            def_info: Some((def.id, def.span)),
+            is_transparent,
+            edition,
+        }
     }
 }
 

@@ -10,7 +10,7 @@
 
 use hir::def_id::DefId;
 use hir::map::definitions::DefPathData;
-use middle::const_val::ConstVal;
+use mir::interpret::ConstValue;
 use middle::region::{self, BlockRemainder};
 use ty::subst::{self, Subst};
 use ty::{BrAnon, BrEnv, BrFresh, BrNamed};
@@ -271,6 +271,7 @@ impl PrintContext {
                 match key.disambiguated_data.data {
                     DefPathData::AssocTypeInTrait(_) |
                     DefPathData::AssocTypeInImpl(_) |
+                    DefPathData::AssocExistentialInImpl(_) |
                     DefPathData::Trait(_) |
                     DefPathData::TypeNs(_) => {
                         break;
@@ -291,8 +292,7 @@ impl PrintContext {
                     DefPathData::Field(_) |
                     DefPathData::StructCtor |
                     DefPathData::AnonConst |
-                    DefPathData::ExistentialImplTrait |
-                    DefPathData::UniversalImplTrait |
+                    DefPathData::ImplTrait |
                     DefPathData::GlobalMetaData(_) => {
                         // if we're making a symbol for something, there ought
                         // to be a value or type-def or something in there
@@ -429,7 +429,7 @@ impl PrintContext {
             ty::tls::with(|tcx|
                 print!(f, self,
                        write("{}=",
-                             tcx.associated_item(projection.projection_ty.item_def_id).name),
+                             tcx.associated_item(projection.projection_ty.item_def_id).ident),
                        print_display(projection.ty))
             )?;
         }
@@ -1082,6 +1082,20 @@ define_print! {
                     }
 
                     ty::tls::with(|tcx| {
+                        let def_key = tcx.def_key(def_id);
+                        if let Some(name) = def_key.disambiguated_data.data.get_opt_name() {
+                            write!(f, "{}", name)?;
+                            let mut substs = substs.iter();
+                            if let Some(first) = substs.next() {
+                                write!(f, "::<")?;
+                                write!(f, "{}", first)?;
+                                for subst in substs {
+                                    write!(f, ", {}", subst)?;
+                                }
+                                write!(f, ">")?;
+                            }
+                            return Ok(());
+                        }
                         // Grab the "TraitA + TraitB" from `impl TraitA + TraitB`,
                         // by looking up the projections associated with the def_id.
                         let predicates_of = tcx.predicates_of(def_id);
@@ -1195,12 +1209,12 @@ define_print! {
                 TyArray(ty, sz) => {
                     print!(f, cx, write("["), print(ty), write("; "))?;
                     match sz.val {
-                        ConstVal::Value(..) => ty::tls::with(|tcx| {
-                            write!(f, "{}", sz.unwrap_usize(tcx))
-                        })?,
-                        ConstVal::Unevaluated(_def_id, _substs) => {
+                        ConstValue::Unevaluated(_def_id, _substs) => {
                             write!(f, "_")?;
                         }
+                        _ => ty::tls::with(|tcx| {
+                            write!(f, "{}", sz.unwrap_usize(tcx))
+                        })?,
                     }
                     write!(f, "]")
                 }
@@ -1286,7 +1300,7 @@ define_print! {
             //   parameterized(f, self.substs, self.item_def_id, &[])
             // (which currently ICEs).
             let (trait_ref, item_name) = ty::tls::with(|tcx|
-                (self.trait_ref(tcx), tcx.associated_item(self.item_def_id).name)
+                (self.trait_ref(tcx), tcx.associated_item(self.item_def_id).ident)
             );
             print!(f, cx, print_debug(trait_ref), write("::{}", item_name))
         }

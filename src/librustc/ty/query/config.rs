@@ -11,7 +11,7 @@
 use dep_graph::SerializedDepNodeIndex;
 use dep_graph::DepNode;
 use hir::def_id::{CrateNum, DefId, DefIndex};
-use mir::interpret::{GlobalId, ConstValue};
+use mir::interpret::GlobalId;
 use traits::query::{
     CanonicalPredicateGoal, CanonicalProjectionGoal, CanonicalTyGoal, CanonicalTypeOpEqGoal,
     CanonicalTypeOpNormalizeGoal, CanonicalTypeOpProvePredicateGoal, CanonicalTypeOpSubtypeGoal,
@@ -84,6 +84,12 @@ impl<'tcx> QueryDescription<'tcx> for queries::normalize_projection_ty<'tcx> {
         goal: CanonicalProjectionGoal<'tcx>,
     ) -> String {
         format!("normalizing `{:?}`", goal)
+    }
+}
+
+impl<'tcx> QueryDescription<'tcx> for queries::implied_outlives_bounds<'tcx> {
+    fn describe(_tcx: TyCtxt, goal: CanonicalTyGoal<'tcx>) -> String {
+        format!("computing implied outlives bounds for `{:?}`", goal)
     }
 }
 
@@ -191,8 +197,8 @@ impl<'tcx> QueryDescription<'tcx> for queries::super_predicates_of<'tcx> {
 }
 
 impl<'tcx> QueryDescription<'tcx> for queries::const_value_to_allocation<'tcx> {
-    fn describe(_tcx: TyCtxt, (val, ty): (ConstValue<'tcx>, Ty<'tcx>)) -> String {
-        format!("converting value `{:?}` ({}) to an allocation", val, ty)
+    fn describe(_tcx: TyCtxt, val: &'tcx ty::Const<'tcx>) -> String {
+        format!("converting value `{:?}` to an allocation", val)
     }
 }
 
@@ -773,12 +779,6 @@ impl<'tcx> QueryDescription<'tcx> for queries::target_features_whitelist<'tcx> {
 impl<'tcx> QueryDescription<'tcx> for queries::instance_def_size_estimate<'tcx> {
     fn describe(tcx: TyCtxt, def: ty::InstanceDef<'tcx>) -> String {
         format!("estimating size for `{}`", tcx.item_path_str(def.def_id()))
-    }
-}
-
-impl<'tcx> QueryDescription<'tcx> for queries::wasm_custom_sections<'tcx> {
-    fn describe(_tcx: TyCtxt, _: CrateNum) -> String {
-        format!("custom wasm sections for a crate")
     }
 }
 

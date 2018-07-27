@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![deny(bare_trait_objects)]
+
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
@@ -15,8 +17,9 @@
 #![feature(box_patterns)]
 #![feature(fs_read_write)]
 #![feature(libc)]
-#![cfg_attr(stage0, feature(macro_lifetime_matcher))]
+#![feature(macro_at_most_once_rep)]
 #![feature(proc_macro_internals)]
+#![feature(proc_macro_quote)]
 #![feature(quote)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(slice_sort_by_cached_key)]

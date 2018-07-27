@@ -519,9 +519,8 @@ impl<'test> TestCx<'test> {
 
     fn compare_source(&self, expected: &str, actual: &str) {
         if expected != actual {
-            self.error("pretty-printed source does not match expected source");
-            println!(
-                "\n\
+            self.fatal(&format!(
+                "pretty-printed source does not match expected source\n\
                  expected:\n\
                  ------------------------------------------\n\
                  {}\n\
@@ -531,7 +530,7 @@ impl<'test> TestCx<'test> {
                  {}\n\
                  ------------------------------------------\n\
                  \n",
-                expected, actual
+                expected, actual)
             );
         }
     }
@@ -1171,12 +1170,10 @@ impl<'test> TestCx<'test> {
     }
 
     fn check_no_compiler_crash(&self, proc_res: &ProcRes) {
-        for line in proc_res.stderr.lines() {
-            if line.contains("error: internal compiler error") {
-                self.fatal_proc_rec("compiler encountered internal error", proc_res);
-            } else if line.contains(" panicked at ") {
-                self.fatal_proc_rec("compiler panicked", proc_res);
-            }
+        match proc_res.status.code() {
+            Some(101) => self.fatal_proc_rec("compiler encountered internal error", proc_res),
+            None => self.fatal_proc_rec("compiler terminated by signal", proc_res),
+            _ => (),
         }
     }
 
@@ -1197,6 +1194,10 @@ impl<'test> TestCx<'test> {
             self.fatal_proc_rec("process did not return an error status", proc_res);
         }
 
+        // On Windows, keep all '\' path separators to match the paths reported in the JSON output
+        // from the compiler
+        let os_file_name = self.testpaths.file.display().to_string();
+
         // on windows, translate all '\' path separators to '/'
         let file_name = format!("{}", self.testpaths.file.display()).replace(r"\", "/");
 
@@ -1212,7 +1213,7 @@ impl<'test> TestCx<'test> {
             .any(|ee| ee.kind == Some(ErrorKind::Note));
 
         // Parse the JSON output from the compiler and extract out the messages.
-        let actual_errors = json::parse_output(&file_name, &proc_res.stderr, proc_res);
+        let actual_errors = json::parse_output(&os_file_name, &proc_res.stderr, proc_res);
         let mut unexpected = Vec::new();
         let mut found = vec![false; expected_errors.len()];
         for actual_error in &actual_errors {

@@ -414,13 +414,13 @@ impl ToJson for Type {
     fn to_json(&self) -> Json {
         match self.name {
             Some(ref name) => {
-                let mut data = BTreeMap::new();
-                data.insert("n".to_owned(), name.to_json());
+                let mut data = Vec::with_capacity(2);
+                data.push(name.to_json());
                 if let Some(ref generics) = self.generics {
-                    data.insert("g".to_owned(), generics.to_json());
+                    data.push(generics.to_json());
                 }
-                Json::Object(data)
-            },
+                Json::Array(data)
+            }
             None => Json::Null
         }
     }
@@ -439,14 +439,12 @@ impl ToJson for IndexItemFunctionType {
         if self.inputs.iter().chain(self.output.iter()).any(|ref i| i.name.is_none()) {
             Json::Null
         } else {
-            let mut data = BTreeMap::new();
-            if !self.inputs.is_empty() {
-                data.insert("i".to_owned(), self.inputs.to_json());
-            }
+            let mut data = Vec::with_capacity(2);
+            data.push(self.inputs.to_json());
             if let Some(ref output) = self.output {
-                data.insert("o".to_owned(), output.to_json());
+                data.push(output.to_json());
             }
-            Json::Object(data)
+            Json::Array(data)
         }
     }
 }
@@ -963,9 +961,11 @@ themePicker.onblur = handleThemeButtonsBlur;
     // with rustdoc running in parallel.
     all_indexes.sort();
     let mut w = try_err!(File::create(&dst), &dst);
-    try_err!(writeln!(&mut w, "var searchIndex = {{}};"), &dst);
+    try_err!(writeln!(&mut w, "var N = null;var searchIndex = {{}};"), &dst);
     for index in &all_indexes {
-        try_err!(writeln!(&mut w, "{}", *index), &dst);
+        try_err!(write_minify_replacer(&mut w, &*index, enable_minification,
+                                       &[(minifier::js::Keyword::Null, "N")]),
+                 &dst);
     }
     try_err!(writeln!(&mut w, "initSearch(searchIndex);"), &dst);
 
@@ -1073,6 +1073,19 @@ fn write_minify(dst: PathBuf, contents: &str, enable_minification: bool) -> Resu
         }
     } else {
         write(dst, contents.as_bytes())
+    }
+}
+
+fn write_minify_replacer<W: Write>(dst: &mut W,
+                                   contents: &str,
+                                   enable_minification: bool,
+                                   keywords_to_replace: &[(minifier::js::Keyword, &str)])
+                                   -> io::Result<()> {
+    if enable_minification {
+        writeln!(dst, "{}",
+                 minifier::js::minify_and_replace_keywords(contents, keywords_to_replace))
+    } else {
+        writeln!(dst, "{}", contents)
     }
 }
 
@@ -1557,6 +1570,7 @@ struct AllTypes {
     macros: HashSet<ItemEntry>,
     functions: HashSet<ItemEntry>,
     typedefs: HashSet<ItemEntry>,
+    existentials: HashSet<ItemEntry>,
     statics: HashSet<ItemEntry>,
     constants: HashSet<ItemEntry>,
     keywords: HashSet<ItemEntry>,
@@ -1573,6 +1587,7 @@ impl AllTypes {
             macros: HashSet::with_capacity(100),
             functions: HashSet::with_capacity(100),
             typedefs: HashSet::with_capacity(100),
+            existentials: HashSet::with_capacity(100),
             statics: HashSet::with_capacity(100),
             constants: HashSet::with_capacity(100),
             keywords: HashSet::with_capacity(100),
@@ -1594,6 +1609,7 @@ impl AllTypes {
                 ItemType::Macro => self.macros.insert(ItemEntry::new(new_url, name)),
                 ItemType::Function => self.functions.insert(ItemEntry::new(new_url, name)),
                 ItemType::Typedef => self.typedefs.insert(ItemEntry::new(new_url, name)),
+                ItemType::Existential => self.existentials.insert(ItemEntry::new(new_url, name)),
                 ItemType::Static => self.statics.insert(ItemEntry::new(new_url, name)),
                 ItemType::Constant => self.constants.insert(ItemEntry::new(new_url, name)),
                 _ => true,
@@ -1637,6 +1653,7 @@ impl fmt::Display for AllTypes {
         print_entries(f, &self.macros, "Macros", "macros")?;
         print_entries(f, &self.functions, "Functions", "functions")?;
         print_entries(f, &self.typedefs, "Typedefs", "typedefs")?;
+        print_entries(f, &self.existentials, "Existentials", "existentials")?;
         print_entries(f, &self.statics, "Statics", "statics")?;
         print_entries(f, &self.constants, "Constants", "constants")
     }
@@ -1656,6 +1673,8 @@ impl<'a> Settings<'a> {
             settings: vec![
                 ("item-declarations", "Auto-hide item declarations.", true),
                 ("item-attributes", "Auto-hide item attributes.", true),
+                ("trait-implementations", "Auto-hide trait implementations documentation",
+                 true),
                 ("go-to-only-result", "Directly go to item in search if there is only one result",
                  false),
             ],
@@ -1953,7 +1972,6 @@ impl Context {
 
                 // If the item is a macro, redirect from the old macro URL (with !)
                 // to the new one (without).
-                // FIXME(#35705) remove this redirect.
                 if item_type == ItemType::Macro {
                     let redir_name = format!("{}.{}!.html", item_type, name);
                     let redir_dst = self.dst.join(redir_name);
@@ -2084,6 +2102,7 @@ impl<'a> fmt::Display for Item<'a> {
             clean::ConstantItem(..) => write!(fmt, "Constant ")?,
             clean::ForeignTypeItem => write!(fmt, "Foreign Type ")?,
             clean::KeywordItem(..) => write!(fmt, "Keyword ")?,
+            clean::ExistentialItem(..) => write!(fmt, "Existential Type ")?,
             _ => {
                 // We don't generate pages for any other type.
                 unreachable!();
@@ -2148,6 +2167,7 @@ impl<'a> fmt::Display for Item<'a> {
             clean::ConstantItem(ref c) => item_constant(fmt, self.cx, self.item, c),
             clean::ForeignTypeItem => item_foreign_type(fmt, self.cx, self.item),
             clean::KeywordItem(ref k) => item_keyword(fmt, self.cx, self.item, k),
+            clean::ExistentialItem(ref e, _) => item_existential(fmt, self.cx, self.item, e),
             _ => {
                 // We don't generate pages for any other type.
                 unreachable!();
@@ -2259,6 +2279,37 @@ fn document_stability(w: &mut fmt::Formatter, cx: &Context, item: &clean::Item) 
         }
         write!(w, "</div>")?;
     }
+    Ok(())
+}
+
+fn document_non_exhaustive_header(item: &clean::Item) -> &str {
+    if item.is_non_exhaustive() { " (Non-exhaustive)" } else { "" }
+}
+
+fn document_non_exhaustive(w: &mut fmt::Formatter, item: &clean::Item) -> fmt::Result {
+    if item.is_non_exhaustive() {
+        write!(w, "<div class='docblock non-exhaustive non-exhaustive-{}'>", {
+            if item.is_struct() { "struct" } else if item.is_enum() { "enum" } else { "type" }
+        })?;
+
+        if item.is_struct() {
+            write!(w, "Non-exhaustive structs could have additional fields added in future. \
+                       Therefore, non-exhaustive structs cannot be constructed in external crates \
+                       using the traditional <code>Struct {{ .. }}</code> syntax; cannot be \
+                       matched against without a wildcard <code>..</code>; and \
+                       struct update syntax will not work.")?;
+        } else if item.is_enum() {
+            write!(w, "Non-exhaustive enums could have additional variants added in future. \
+                       Therefore, when matching against variants of non-exhaustive enums, an \
+                       extra wildcard arm must be added to account for any future variants.")?;
+        } else {
+            write!(w, "This type will require a wildcard arm in any match statements or \
+                       constructors.")?;
+        }
+
+        write!(w, "</div>")?;
+    }
+
     Ok(())
 }
 
@@ -2666,18 +2717,17 @@ fn render_impls(cx: &Context, w: &mut fmt::Formatter,
     Ok(())
 }
 
-fn item_trait(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
-              t: &clean::Trait) -> fmt::Result {
+fn bounds(t_bounds: &[clean::GenericBound]) -> String {
     let mut bounds = String::new();
     let mut bounds_plain = String::new();
-    if !t.bounds.is_empty() {
+    if !t_bounds.is_empty() {
         if !bounds.is_empty() {
             bounds.push(' ');
             bounds_plain.push(' ');
         }
         bounds.push_str(": ");
         bounds_plain.push_str(": ");
-        for (i, p) in t.bounds.iter().enumerate() {
+        for (i, p) in t_bounds.iter().enumerate() {
             if i > 0 {
                 bounds.push_str(" + ");
                 bounds_plain.push_str(" + ");
@@ -2686,7 +2736,16 @@ fn item_trait(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
             bounds_plain.push_str(&format!("{:#}", *p));
         }
     }
+    bounds
+}
 
+fn item_trait(
+    w: &mut fmt::Formatter,
+    cx: &Context,
+    it: &clean::Item,
+    t: &clean::Trait,
+) -> fmt::Result {
+    let bounds = bounds(&t.bounds);
     let types = t.items.iter().filter(|m| m.is_associated_type()).collect::<Vec<_>>();
     let consts = t.items.iter().filter(|m| m.is_associated_const()).collect::<Vec<_>>();
     let required = t.items.iter().filter(|m| m.is_ty_method()).collect::<Vec<_>>();
@@ -3122,7 +3181,9 @@ fn item_struct(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
     if let doctree::Plain = s.struct_type {
         if fields.peek().is_some() {
             write!(w, "<h2 id='fields' class='fields small-section-header'>
-                       Fields<a href='#fields' class='anchor'></a></h2>")?;
+                       Fields{}<a href='#fields' class='anchor'></a></h2>",
+                       document_non_exhaustive_header(it))?;
+            document_non_exhaustive(w, it)?;
             for (field, ty) in fields {
                 let id = derive_id(format!("{}.{}",
                                            ItemType::StructField,
@@ -3254,7 +3315,9 @@ fn item_enum(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
     document(w, cx, it)?;
     if !e.variants.is_empty() {
         write!(w, "<h2 id='variants' class='variants small-section-header'>
-                   Variants<a href='#variants' class='anchor'></a></h2>\n")?;
+                   Variants{}<a href='#variants' class='anchor'></a></h2>\n",
+                   document_non_exhaustive_header(it))?;
+        document_non_exhaustive(w, it)?;
         for variant in &e.variants {
             let id = derive_id(format!("{}.{}",
                                        ItemType::Variant,
@@ -3355,7 +3418,8 @@ const ATTRIBUTE_WHITELIST: &'static [&'static str] = &[
     "must_use",
     "no_mangle",
     "repr",
-    "unsafe_destructor_blind_to_params"
+    "unsafe_destructor_blind_to_params",
+    "non_exhaustive"
 ];
 
 fn render_attributes(w: &mut fmt::Formatter, it: &clean::Item) -> fmt::Result {
@@ -3886,6 +3950,29 @@ fn render_impl(w: &mut fmt::Formatter, cx: &Context, i: &Impl, link: AssocItemLi
     Ok(())
 }
 
+fn item_existential(
+    w: &mut fmt::Formatter,
+    cx: &Context,
+    it: &clean::Item,
+    t: &clean::Existential,
+) -> fmt::Result {
+    write!(w, "<pre class='rust existential'>")?;
+    render_attributes(w, it)?;
+    write!(w, "existential type {}{}{where_clause}: {bounds};</pre>",
+           it.name.as_ref().unwrap(),
+           t.generics,
+           where_clause = WhereClause { gens: &t.generics, indent: 0, end_newline: true },
+           bounds = bounds(&t.bounds))?;
+
+    document(w, cx, it)?;
+
+    // Render any items associated directly to this alias, as otherwise they
+    // won't be visible anywhere in the docs. It would be nice to also show
+    // associated items from the aliased type (see discussion in #32077), but
+    // we need #14072 to make sense of the generics.
+    render_assoc_items(w, cx, it, it.def_id, AssocItemRender::All)
+}
+
 fn item_typedef(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
                 t: &clean::Typedef) -> fmt::Result {
     write!(w, "<pre class='rust typedef'>")?;
@@ -4385,6 +4472,7 @@ fn item_ty_to_strs(ty: &ItemType) -> (&'static str, &'static str) {
         ItemType::AssociatedConst => ("associated-consts", "Associated Constants"),
         ItemType::ForeignType     => ("foreign-types", "Foreign Types"),
         ItemType::Keyword         => ("keywords", "Keywords"),
+        ItemType::Existential     => ("existentials", "Existentials"),
     }
 }
 

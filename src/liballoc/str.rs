@@ -45,13 +45,13 @@ use core::str::pattern::{Searcher, ReverseSearcher, DoubleEndedSearcher};
 use core::mem;
 use core::ptr;
 use core::iter::FusedIterator;
+use core::unicode::conversions;
 
 use borrow::{Borrow, ToOwned};
 use boxed::Box;
 use slice::{SliceConcatExt, SliceIndex};
 use string::String;
 use vec::Vec;
-use vec_deque::VecDeque;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::str::{FromStr, Utf8Error};
@@ -268,11 +268,11 @@ impl str {
         let mut result = String::new();
         let mut last_end = 0;
         for (start, part) in self.match_indices(from) {
-            result.push_str(unsafe { self.slice_unchecked(last_end, start) });
+            result.push_str(unsafe { self.get_unchecked(last_end..start) });
             result.push_str(to);
             last_end = start + part.len();
         }
-        result.push_str(unsafe { self.slice_unchecked(last_end, self.len()) });
+        result.push_str(unsafe { self.get_unchecked(last_end..self.len()) });
         result
     }
 
@@ -309,11 +309,11 @@ impl str {
         let mut result = String::with_capacity(32);
         let mut last_end = 0;
         for (start, part) in self.match_indices(pat).take(count) {
-            result.push_str(unsafe { self.slice_unchecked(last_end, start) });
+            result.push_str(unsafe { self.get_unchecked(last_end..start) });
             result.push_str(to);
             last_end = start + part.len();
         }
-        result.push_str(unsafe { self.slice_unchecked(last_end, self.len()) });
+        result.push_str(unsafe { self.get_unchecked(last_end..self.len()) });
         result
     }
 
@@ -370,7 +370,18 @@ impl str {
                 // See https://github.com/rust-lang/rust/issues/26035
                 map_uppercase_sigma(self, i, &mut s)
             } else {
-                s.extend(c.to_lowercase());
+                match conversions::to_lower(c) {
+                    [a, '\0', _] => s.push(a),
+                    [a, b, '\0'] => {
+                        s.push(a);
+                        s.push(b);
+                    }
+                    [a, b, c] => {
+                        s.push(a);
+                        s.push(b);
+                        s.push(c);
+                    }
+                }
             }
         }
         return s;
@@ -424,7 +435,20 @@ impl str {
     #[stable(feature = "unicode_case_mapping", since = "1.2.0")]
     pub fn to_uppercase(&self) -> String {
         let mut s = String::with_capacity(self.len());
-        s.extend(self.chars().flat_map(|c| c.to_uppercase()));
+        for c in self[..].chars() {
+            match conversions::to_upper(c) {
+                [a, '\0', _] => s.push(a),
+                [a, b, '\0'] => {
+                    s.push(a);
+                    s.push(b);
+                }
+                [a, b, c] => {
+                    s.push(a);
+                    s.push(b);
+                    s.push(c);
+                }
+            }
+        }
         return s;
     }
 

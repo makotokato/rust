@@ -43,7 +43,7 @@ use ast::{BinOpKind, UnOp};
 use ast::{RangeEnd, RangeSyntax};
 use {ast, attr};
 use codemap::{self, CodeMap, Spanned, respan};
-use syntax_pos::{self, Span, MultiSpan, BytePos, FileName, DUMMY_SP, edition::Edition};
+use syntax_pos::{self, Span, MultiSpan, BytePos, FileName, edition::Edition};
 use errors::{self, Applicability, DiagnosticBuilder};
 use parse::{self, SeqSep, classify, token};
 use parse::lexer::TokenAndSpan;
@@ -62,6 +62,15 @@ use std::cmp;
 use std::mem;
 use std::path::{self, Path, PathBuf};
 use std::slice;
+
+#[derive(Debug)]
+/// Whether the type alias or associated type is a concrete type or an existential type
+pub enum AliasKind {
+    /// Just a new name for the same type
+    Weak(P<Ty>),
+    /// Only trait impls of the type will be usable, not the actual type itself
+    Existential(GenericBounds),
+}
 
 bitflags! {
     struct Restrictions: u8 {
@@ -95,13 +104,13 @@ pub enum PathStyle {
     Mod,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum SemiColonMode {
     Break,
     Ignore,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum BlockMode {
     Break,
     Ignore,
@@ -279,8 +288,8 @@ struct TokenCursorFrame {
 /// on the parser.
 #[derive(Clone)]
 enum LastToken {
-    Collecting(Vec<TokenTree>),
-    Was(Option<TokenTree>),
+    Collecting(Vec<TokenStream>),
+    Was(Option<TokenStream>),
 }
 
 impl TokenCursorFrame {
@@ -317,8 +326,8 @@ impl TokenCursor {
             };
 
             match self.frame.last_token {
-                LastToken::Collecting(ref mut v) => v.push(tree.clone()),
-                LastToken::Was(ref mut t) => *t = Some(tree.clone()),
+                LastToken::Collecting(ref mut v) => v.push(tree.clone().into()),
+                LastToken::Was(ref mut t) => *t = Some(tree.clone().into()),
             }
 
             match tree {
@@ -376,7 +385,7 @@ impl TokenCursor {
     }
 }
 
-#[derive(PartialEq, Eq, Clone)]
+#[derive(Clone, PartialEq)]
 crate enum TokenType {
     Token(token::Token),
     Keyword(keywords::Keyword),
@@ -522,7 +531,7 @@ fn dummy_arg(span: Span) -> Arg {
     Arg { ty: P(ty), pat: pat, id: ast::DUMMY_NODE_ID }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug)]
 enum TokenExpectType {
     Expect,
     NoExpect,
@@ -567,7 +576,7 @@ impl<'a> Parser<'a> {
 
         if let Some(directory) = directory {
             parser.directory = directory;
-        } else if !parser.span.source_equal(&DUMMY_SP) {
+        } else if !parser.span.is_dummy() {
             if let FileName::Real(mut path) = sess.codemap().span_to_unmapped_path(parser.span) {
                 path.pop();
                 parser.directory.path = Cow::from(path);
@@ -584,7 +593,7 @@ impl<'a> Parser<'a> {
         } else {
             self.token_cursor.next()
         };
-        if next.sp == syntax_pos::DUMMY_SP {
+        if next.sp.is_dummy() {
             // Tweak the location for better diagnostics, but keep syntactic context intact.
             next.sp = self.prev_span.with_ctxt(next.sp.ctxt());
         }
@@ -1299,7 +1308,10 @@ impl<'a> Parser<'a> {
     /// Parse asyncness: `async` or nothing
     fn parse_asyncness(&mut self) -> IsAsync {
         if self.eat_keyword(keywords::Async) {
-            IsAsync::Async(ast::DUMMY_NODE_ID)
+            IsAsync::Async {
+                closure_id: ast::DUMMY_NODE_ID,
+                return_impl_trait_id: ast::DUMMY_NODE_ID,
+            }
         } else {
             IsAsync::NotAsync
         }
@@ -1537,7 +1549,7 @@ impl<'a> Parser<'a> {
             // Always parse bounds greedily for better error recovery.
             let bounds = self.parse_generic_bounds()?;
             impl_dyn_multi = bounds.len() > 1 || self.prev_token_kind == PrevTokenKind::Plus;
-            TyKind::ImplTrait(bounds)
+            TyKind::ImplTrait(ast::DUMMY_NODE_ID, bounds)
         } else if self.check_keyword(keywords::Dyn) &&
                   self.look_ahead(1, |t| t.can_begin_bound() &&
                                          !can_continue_type_after_non_fn_ident(t)) {
@@ -3279,10 +3291,8 @@ impl<'a> Parser<'a> {
         } else {
             Movability::Movable
         };
-        let asyncness = if self.span.edition() >= Edition::Edition2018
-            && self.eat_keyword(keywords::Async)
-        {
-            IsAsync::Async(ast::DUMMY_NODE_ID)
+        let asyncness = if self.span.edition() >= Edition::Edition2018 {
+            self.parse_asyncness()
         } else {
             IsAsync::NotAsync
         };
@@ -4381,6 +4391,11 @@ impl<'a> Parser<'a> {
         self.token.is_keyword(keywords::Extern) && self.look_ahead(1, |t| t != &token::ModSep)
     }
 
+    fn is_existential_type_decl(&self) -> bool {
+        self.token.is_keyword(keywords::Existential) &&
+        self.look_ahead(1, |t| t.is_keyword(keywords::Type))
+    }
+
     fn is_auto_trait_item(&mut self) -> bool {
         // auto trait
         (self.token.is_keyword(keywords::Auto)
@@ -4485,6 +4500,7 @@ impl<'a> Parser<'a> {
                   !self.is_union_item() &&
                   !self.is_crate_vis() &&
                   !self.is_extern_non_path() &&
+                  !self.is_existential_type_decl() &&
                   !self.is_auto_trait_item() {
             let pth = self.parse_path(PathStyle::Expr)?;
 
@@ -5501,16 +5517,13 @@ impl<'a> Parser<'a> {
         let lo = self.span;
         let vis = self.parse_visibility(false)?;
         let defaultness = self.parse_defaultness();
-        let (name, node, generics) = if self.eat_keyword(keywords::Type) {
-            // This parses the grammar:
-            //     ImplItemAssocTy = Ident ["<"...">"] ["where" ...] "=" Ty ";"
-            let name = self.parse_ident()?;
-            let mut generics = self.parse_generics()?;
-            generics.where_clause = self.parse_where_clause()?;
-            self.expect(&token::Eq)?;
-            let typ = self.parse_ty()?;
-            self.expect(&token::Semi)?;
-            (name, ast::ImplItemKind::Type(typ), generics)
+        let (name, node, generics) = if let Some(type_) = self.eat_type() {
+            let (name, alias, generics) = type_?;
+            let kind = match alias {
+                AliasKind::Weak(typ) => ast::ImplItemKind::Type(typ),
+                AliasKind::Existential(bounds) => ast::ImplItemKind::Existential(bounds),
+            };
+            (name, kind, generics)
         } else if self.is_const_item() {
             // This parses the grammar:
             //     ImplItemConst = "const" Ident ":" Ty "=" Expr ";"
@@ -6031,7 +6044,10 @@ impl<'a> Parser<'a> {
         }
 
         if !self.eat_keyword(keywords::Pub) {
-            return Ok(respan(self.prev_span, VisibilityKind::Inherited))
+            // We need a span for our `Spanned<VisibilityKind>`, but there's inherently no
+            // keyword to grab a span from for inherited visibility; an empty span at the
+            // beginning of the current token would seem to be the "Schelling span".
+            return Ok(respan(self.span.shrink_to_lo(), VisibilityKind::Inherited))
         }
         let lo = self.prev_span;
 
@@ -6131,13 +6147,29 @@ impl<'a> Parser<'a> {
                 err.span_suggestion_short_with_applicability(
                     self.span, msg, "".to_string(), Applicability::MachineApplicable
                 );
+                if !items.is_empty() {  // Issue #51603
+                    let previous_item = &items[items.len()-1];
+                    let previous_item_kind_name = match previous_item.node {
+                        // say "braced struct" because tuple-structs and
+                        // braceless-empty-struct declarations do take a semicolon
+                        ItemKind::Struct(..) => Some("braced struct"),
+                        ItemKind::Enum(..) => Some("enum"),
+                        ItemKind::Trait(..) => Some("trait"),
+                        ItemKind::Union(..) => Some("union"),
+                        _ => None,
+                    };
+                    if let Some(name) = previous_item_kind_name {
+                        err.help(&format!("{} declarations are not followed by a semicolon",
+                                          name));
+                    }
+                }
             } else {
                 err.span_label(self.span, "expected item");
             }
             return Err(err);
         }
 
-        let hi = if self.span == syntax_pos::DUMMY_SP {
+        let hi = if self.span.is_dummy() {
             inner_lo
         } else {
             self.prev_span
@@ -6368,7 +6400,7 @@ impl<'a> Parser<'a> {
                 }
                 let mut err = self.diagnostic().struct_span_err(id_sp,
                     "cannot declare a new module at this location");
-                if id_sp != syntax_pos::DUMMY_SP {
+                if !id_sp.is_dummy() {
                     let src_path = self.sess.codemap().span_to_filename(id_sp);
                     if let FileName::Real(src_path) = src_path {
                         if let Some(stem) = src_path.file_stem() {
@@ -6543,14 +6575,43 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse type Foo = Bar;
-    fn parse_item_type(&mut self) -> PResult<'a, ItemInfo> {
+    /// or
+    /// existential type Foo: Bar;
+    /// or
+    /// return None without modifying the parser state
+    fn eat_type(&mut self) -> Option<PResult<'a, (Ident, AliasKind, ast::Generics)>> {
+        // This parses the grammar:
+        //     Ident ["<"...">"] ["where" ...] ("=" | ":") Ty ";"
+        if self.check_keyword(keywords::Type) ||
+           self.check_keyword(keywords::Existential) &&
+                self.look_ahead(1, |t| t.is_keyword(keywords::Type)) {
+            let existential = self.eat_keyword(keywords::Existential);
+            assert!(self.eat_keyword(keywords::Type));
+            Some(self.parse_existential_or_alias(existential))
+        } else {
+            None
+        }
+    }
+
+    /// Parse type alias or existential type
+    fn parse_existential_or_alias(
+        &mut self,
+        existential: bool,
+    ) -> PResult<'a, (Ident, AliasKind, ast::Generics)> {
         let ident = self.parse_ident()?;
         let mut tps = self.parse_generics()?;
         tps.where_clause = self.parse_where_clause()?;
-        self.expect(&token::Eq)?;
-        let ty = self.parse_ty()?;
+        let alias = if existential {
+            self.expect(&token::Colon)?;
+            let bounds = self.parse_generic_bounds()?;
+            AliasKind::Existential(bounds)
+        } else {
+            self.expect(&token::Eq)?;
+            let ty = self.parse_ty()?;
+            AliasKind::Weak(ty)
+        };
         self.expect(&token::Semi)?;
-        Ok((ident, ItemKind::Ty(ty, tps), None))
+        Ok((ident, alias, tps))
     }
 
     /// Parse the part of an "enum" decl following the '{'
@@ -6668,11 +6729,49 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_item_(
+        &mut self,
+        attrs: Vec<Attribute>,
+        macros_allowed: bool,
+        attributes_allowed: bool,
+    ) -> PResult<'a, Option<P<Item>>> {
+        let (ret, tokens) = self.collect_tokens(|this| {
+            this.parse_item_implementation(attrs, macros_allowed, attributes_allowed)
+        })?;
+
+        // Once we've parsed an item and recorded the tokens we got while
+        // parsing we may want to store `tokens` into the item we're about to
+        // return. Note, though, that we specifically didn't capture tokens
+        // related to outer attributes. The `tokens` field here may later be
+        // used with procedural macros to convert this item back into a token
+        // stream, but during expansion we may be removing attributes as we go
+        // along.
+        //
+        // If we've got inner attributes then the `tokens` we've got above holds
+        // these inner attributes. If an inner attribute is expanded we won't
+        // actually remove it from the token stream, so we'll just keep yielding
+        // it (bad!). To work around this case for now we just avoid recording
+        // `tokens` if we detect any inner attributes. This should help keep
+        // expansion correct, but we should fix this bug one day!
+        Ok(ret.map(|item| {
+            item.map(|mut i| {
+                if !i.attrs.iter().any(|attr| attr.style == AttrStyle::Inner) {
+                    i.tokens = Some(tokens);
+                }
+                i
+            })
+        }))
+    }
+
     /// Parse one of the items allowed by the flags.
     /// NB: this function no longer parses the items inside an
     /// extern crate.
-    fn parse_item_(&mut self, attrs: Vec<Attribute>,
-                   macros_allowed: bool, attributes_allowed: bool) -> PResult<'a, Option<P<Item>>> {
+    fn parse_item_implementation(
+        &mut self,
+        attrs: Vec<Attribute>,
+        macros_allowed: bool,
+        attributes_allowed: bool,
+    ) -> PResult<'a, Option<P<Item>>> {
         maybe_whole!(self, NtItem, |item| {
             let mut item = item.into_inner();
             let mut attrs = attrs;
@@ -6798,7 +6897,10 @@ impl<'a> Parser<'a> {
             let fn_span = self.prev_span;
             let (ident, item_, extra_attrs) =
                 self.parse_item_fn(unsafety,
-                                   IsAsync::Async(ast::DUMMY_NODE_ID),
+                                   IsAsync::Async {
+                                       closure_id: ast::DUMMY_NODE_ID,
+                                       return_impl_trait_id: ast::DUMMY_NODE_ID,
+                                   },
                                    respan(fn_span, Constness::NotConst),
                                    Abi::Rust)?;
             let prev_span = self.prev_span;
@@ -6903,15 +7005,19 @@ impl<'a> Parser<'a> {
                                     maybe_append(attrs, extra_attrs));
             return Ok(Some(item));
         }
-        if self.eat_keyword(keywords::Type) {
+        if let Some(type_) = self.eat_type() {
+            let (ident, alias, generics) = type_?;
             // TYPE ITEM
-            let (ident, item_, extra_attrs) = self.parse_item_type()?;
+            let item_ = match alias {
+                AliasKind::Weak(ty) => ItemKind::Ty(ty, generics),
+                AliasKind::Existential(bounds) => ItemKind::Existential(bounds, generics),
+            };
             let prev_span = self.prev_span;
             let item = self.mk_item(lo.to(prev_span),
                                     ident,
                                     item_,
                                     visibility,
-                                    maybe_append(attrs, extra_attrs));
+                                    attrs);
             return Ok(Some(item));
         }
         if self.eat_keyword(keywords::Enum) {
@@ -6976,7 +7082,7 @@ impl<'a> Parser<'a> {
 
         // Verify whether we have encountered a struct or method definition where the user forgot to
         // add the `struct` or `fn` keyword after writing `pub`: `pub S {}`
-        if visibility.node == VisibilityKind::Public &&
+        if visibility.node.is_pub() &&
             self.check_ident() &&
             self.look_ahead(1, |t| *t != token::Not)
         {
@@ -7198,12 +7304,15 @@ impl<'a> Parser<'a> {
     {
         // Record all tokens we parse when parsing this item.
         let mut tokens = Vec::new();
-        match self.token_cursor.frame.last_token {
-            LastToken::Collecting(_) => {
-                panic!("cannot collect tokens recursively yet")
+        let prev_collecting = match self.token_cursor.frame.last_token {
+            LastToken::Collecting(ref mut list) => {
+                Some(mem::replace(list, Vec::new()))
             }
-            LastToken::Was(ref mut last) => tokens.extend(last.take()),
-        }
+            LastToken::Was(ref mut last) => {
+                tokens.extend(last.take());
+                None
+            }
+        };
         self.token_cursor.frame.last_token = LastToken::Collecting(tokens);
         let prev = self.token_cursor.stack.len();
         let ret = f(self);
@@ -7212,7 +7321,9 @@ impl<'a> Parser<'a> {
         } else {
             &mut self.token_cursor.stack[prev].last_token
         };
-        let mut tokens = match *last_token {
+
+        // Pull our the toekns that we've collected from the call to `f` above
+        let mut collected_tokens = match *last_token {
             LastToken::Collecting(ref mut v) => mem::replace(v, Vec::new()),
             LastToken::Was(_) => panic!("our vector went away?"),
         };
@@ -7220,44 +7331,34 @@ impl<'a> Parser<'a> {
         // If we're not at EOF our current token wasn't actually consumed by
         // `f`, but it'll still be in our list that we pulled out. In that case
         // put it back.
-        if self.token == token::Eof {
-            *last_token = LastToken::Was(None);
+        let extra_token = if self.token != token::Eof {
+            collected_tokens.pop()
         } else {
-            *last_token = LastToken::Was(tokens.pop());
+            None
+        };
+
+        // If we were previously collecting tokens, then this was a recursive
+        // call. In that case we need to record all the tokens we collected in
+        // our parent list as well. To do that we push a clone of our stream
+        // onto the previous list.
+        let stream = collected_tokens.into_iter().collect::<TokenStream>();
+        match prev_collecting {
+            Some(mut list) => {
+                list.push(stream.clone());
+                list.extend(extra_token);
+                *last_token = LastToken::Collecting(list);
+            }
+            None => {
+                *last_token = LastToken::Was(extra_token);
+            }
         }
 
-        Ok((ret?, tokens.into_iter().collect()))
+        Ok((ret?, stream))
     }
 
     pub fn parse_item(&mut self) -> PResult<'a, Option<P<Item>>> {
         let attrs = self.parse_outer_attributes()?;
-
-        let (ret, tokens) = self.collect_tokens(|this| {
-            this.parse_item_(attrs, true, false)
-        })?;
-
-        // Once we've parsed an item and recorded the tokens we got while
-        // parsing we may want to store `tokens` into the item we're about to
-        // return. Note, though, that we specifically didn't capture tokens
-        // related to outer attributes. The `tokens` field here may later be
-        // used with procedural macros to convert this item back into a token
-        // stream, but during expansion we may be removing attributes as we go
-        // along.
-        //
-        // If we've got inner attributes then the `tokens` we've got above holds
-        // these inner attributes. If an inner attribute is expanded we won't
-        // actually remove it from the token stream, so we'll just keep yielding
-        // it (bad!). To work around this case for now we just avoid recording
-        // `tokens` if we detect any inner attributes. This should help keep
-        // expansion correct, but we should fix this bug one day!
-        Ok(ret.map(|item| {
-            item.map(|mut i| {
-                if !i.attrs.iter().any(|attr| attr.style == AttrStyle::Inner) {
-                    i.tokens = Some(tokens);
-                }
-                i
-            })
-        }))
+        self.parse_item_(attrs, true, false)
     }
 
     /// `::{` or `::*`
@@ -7325,7 +7426,7 @@ impl<'a> Parser<'a> {
             match self.token {
                 token::Ident(ident, false) if ident.name == keywords::Underscore.name() => {
                     self.bump(); // `_`
-                    Ok(Some(Ident::new(ident.name.gensymed(), ident.span)))
+                    Ok(Some(ident.gensym()))
                 }
                 _ => self.parse_ident().map(Some),
             }

@@ -256,12 +256,12 @@ fn check_llvm_version(builder: &Builder, llvm_config: &Path) {
     let version = output(cmd.arg("--version"));
     let mut parts = version.split('.').take(2)
         .filter_map(|s| s.parse::<u32>().ok());
-    if let (Some(major), Some(minor)) = (parts.next(), parts.next()) {
-        if major > 3 || (major == 3 && minor >= 9) {
+    if let (Some(major), Some(_minor)) = (parts.next(), parts.next()) {
+        if major >= 5 {
             return
         }
     }
-    panic!("\n\nbad LLVM version: {}, need >=3.9\n\n", version)
+    panic!("\n\nbad LLVM version: {}, need >=5.0\n\n", version)
 }
 
 fn configure_cmake(builder: &Builder,
@@ -631,6 +631,7 @@ impl Step for Openssl {
             "powerpc-unknown-netbsd" => "BSD-generic32",
             "powerpc64-unknown-linux-gnu" => "linux-ppc64",
             "powerpc64le-unknown-linux-gnu" => "linux-ppc64le",
+            "powerpc64le-unknown-linux-musl" => "linux-ppc64le",
             "s390x-unknown-linux-gnu" => "linux64-s390x",
             "sparc-unknown-linux-gnu" => "linux-sparcv9",
             "sparc64-unknown-linux-gnu" => "linux64-sparcv9",

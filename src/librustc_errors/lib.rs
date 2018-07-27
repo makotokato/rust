@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![deny(bare_trait_objects)]
+
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
@@ -110,7 +112,7 @@ pub struct SubstitutionPart {
     pub snippet: String,
 }
 
-pub type CodeMapperDyn = CodeMapper + sync::Send + sync::Sync;
+pub type CodeMapperDyn = dyn CodeMapper + sync::Send + sync::Sync;
 
 pub trait CodeMapper {
     fn lookup_char_pos(&self, pos: BytePos) -> Loc;
@@ -270,9 +272,9 @@ pub struct Handler {
     pub flags: HandlerFlags,
 
     err_count: AtomicUsize,
-    emitter: Lock<Box<Emitter + sync::Send>>,
+    emitter: Lock<Box<dyn Emitter + sync::Send>>,
     continue_after_error: LockCell<bool>,
-    delayed_span_bug: Lock<Option<Diagnostic>>,
+    delayed_span_bugs: Lock<Vec<Diagnostic>>,
 
     // This set contains the `DiagnosticId` of all emitted diagnostics to avoid
     // emitting the same diagnostic with extended help (`--teach`) twice, which
@@ -297,7 +299,23 @@ thread_local!(pub static TRACK_DIAGNOSTICS: Cell<fn(&Diagnostic)> =
 pub struct HandlerFlags {
     pub can_emit_warnings: bool,
     pub treat_err_as_bug: bool,
+    pub report_delayed_bugs: bool,
     pub external_macro_backtrace: bool,
+}
+
+impl Drop for Handler {
+    fn drop(&mut self) {
+        if self.err_count() == 0 {
+            let mut bugs = self.delayed_span_bugs.borrow_mut();
+            let has_bugs = !bugs.is_empty();
+            for bug in bugs.drain(..) {
+                DiagnosticBuilder::new_diagnostic(self, bug).emit();
+            }
+            if has_bugs {
+                panic!("no errors encountered even though `delay_span_bug` issued");
+            }
+        }
+    }
 }
 
 impl Handler {
@@ -326,7 +344,7 @@ impl Handler {
 
     pub fn with_emitter(can_emit_warnings: bool,
                         treat_err_as_bug: bool,
-                        e: Box<Emitter + sync::Send>)
+                        e: Box<dyn Emitter + sync::Send>)
                         -> Handler {
         Handler::with_emitter_and_flags(
             e,
@@ -337,13 +355,14 @@ impl Handler {
             })
     }
 
-    pub fn with_emitter_and_flags(e: Box<Emitter + sync::Send>, flags: HandlerFlags) -> Handler {
+    pub fn with_emitter_and_flags(e: Box<dyn Emitter + sync::Send>, flags: HandlerFlags) -> Handler
+    {
         Handler {
             flags,
             err_count: AtomicUsize::new(0),
             emitter: Lock::new(e),
             continue_after_error: LockCell::new(true),
-            delayed_span_bug: Lock::new(None),
+            delayed_span_bugs: Lock::new(Vec::new()),
             taught_diagnostics: Lock::new(FxHashSet()),
             emitted_diagnostic_codes: Lock::new(FxHashSet()),
             emitted_diagnostics: Lock::new(FxHashSet()),
@@ -500,11 +519,18 @@ impl Handler {
     }
     pub fn delay_span_bug<S: Into<MultiSpan>>(&self, sp: S, msg: &str) {
         if self.flags.treat_err_as_bug {
+            // FIXME: don't abort here if report_delayed_bugs is off
             self.span_bug(sp, msg);
         }
         let mut diagnostic = Diagnostic::new(Level::Bug, msg);
         diagnostic.set_span(sp.into());
-        *self.delayed_span_bug.borrow_mut() = Some(diagnostic);
+        self.delay_as_bug(diagnostic);
+    }
+    fn delay_as_bug(&self, diagnostic: Diagnostic) {
+        if self.flags.report_delayed_bugs {
+            DiagnosticBuilder::new_diagnostic(self, diagnostic.clone()).emit();
+        }
+        self.delayed_span_bugs.borrow_mut().push(diagnostic);
     }
     pub fn span_bug_no_panic<S: Into<MultiSpan>>(&self, sp: S, msg: &str) {
         self.emit(&sp.into(), msg, Bug);
@@ -612,9 +638,6 @@ impl Handler {
 
     pub fn abort_if_errors(&self) {
         if self.err_count() == 0 {
-            if let Some(bug) = self.delayed_span_bug.borrow_mut().take() {
-                DiagnosticBuilder::new_diagnostic(self, bug).emit();
-            }
             return;
         }
         FatalError.raise();

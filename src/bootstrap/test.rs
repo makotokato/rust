@@ -966,7 +966,9 @@ impl Step for Compiletest {
             builder.ensure(compile::Rustc { compiler, target });
         }
 
-        builder.ensure(compile::Test { compiler, target });
+        if builder.no_std(target) != Some(true) {
+            builder.ensure(compile::Test { compiler, target });
+        }
         builder.ensure(native::TestHelpers { target });
         builder.ensure(RemoteCopyLibs { compiler, target });
 
@@ -1269,16 +1271,14 @@ impl Step for DocTest {
 
         files.sort();
 
+        let mut toolstate = ToolState::TestPass;
         for file in files {
-            let test_result = markdown_test(builder, compiler, &file);
-            if self.is_ext_doc {
-                let toolstate = if test_result {
-                    ToolState::TestPass
-                } else {
-                    ToolState::TestFail
-                };
-                builder.save_toolstate(self.name, toolstate);
+            if !markdown_test(builder, compiler, &file) {
+                toolstate = ToolState::TestFail;
             }
+        }
+        if self.is_ext_doc {
+            builder.save_toolstate(self.name, toolstate);
         }
     }
 }
@@ -1732,6 +1732,7 @@ impl Step for CrateRustdoc {
 
         let compiler = builder.compiler(builder.top_stage, self.host);
         let target = compiler.host;
+        builder.ensure(compile::Rustc { compiler, target });
 
         let mut cargo = tool::prepare_tool_cargo(builder,
                                                  compiler,
@@ -1808,7 +1809,10 @@ impl Step for RemoteCopyLibs {
         builder.info(&format!("REMOTE copy libs to emulator ({})", target));
         t!(fs::create_dir_all(builder.out.join("tmp")));
 
-        let server = builder.ensure(tool::RemoteTestServer { compiler, target });
+        let server = builder.ensure(tool::RemoteTestServer {
+            compiler: compiler.with_stage(0),
+            target,
+        });
 
         // Spawn the emulator and wait for it to come online
         let tool = builder.tool_exe(Tool::RemoteTestClient);
