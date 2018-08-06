@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![deny(bare_trait_objects)]
-
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
@@ -28,6 +26,7 @@ extern crate arena;
 #[macro_use]
 extern crate rustc;
 extern crate rustc_data_structures;
+extern crate rustc_metadata;
 
 pub use rustc::hir::def::{Namespace, PerNS};
 
@@ -36,7 +35,7 @@ use self::RibKind::*;
 
 use rustc::hir::map::{Definitions, DefCollector};
 use rustc::hir::{self, PrimTy, TyBool, TyChar, TyFloat, TyInt, TyUint, TyStr};
-use rustc::middle::cstore::{CrateStore, CrateLoader};
+use rustc::middle::cstore::CrateStore;
 use rustc::session::Session;
 use rustc::lint;
 use rustc::hir::def::*;
@@ -45,6 +44,9 @@ use rustc::hir::def_id::{CRATE_DEF_INDEX, LOCAL_CRATE, DefId};
 use rustc::ty;
 use rustc::hir::{Freevar, FreevarMap, TraitCandidate, TraitMap, GlobMap};
 use rustc::util::nodemap::{NodeMap, NodeSet, FxHashMap, FxHashSet, DefIdMap};
+
+use rustc_metadata::creader::CrateLoader;
+use rustc_metadata::cstore::CStore;
 
 use syntax::codemap::CodeMap;
 use syntax::ext::hygiene::{Mark, Transparency, SyntaxContext};
@@ -87,6 +89,10 @@ mod macros;
 mod check_unused;
 mod build_reduced_graph;
 mod resolve_imports;
+
+fn is_known_tool(name: Name) -> bool {
+    ["clippy", "rustfmt"].contains(&&*name.as_str())
+}
 
 /// A free importable items suggested in case of resolution failure.
 struct ImportSuggestion {
@@ -202,15 +208,10 @@ fn resolve_struct_error<'sess, 'a>(resolver: &'sess Resolver,
                         err.span_label(typaram_span, "type variable from outer function");
                     }
                 },
-                Def::Mod(..) | Def::Struct(..) | Def::Union(..) | Def::Enum(..) | Def::Variant(..) |
-                Def::Trait(..) | Def::TyAlias(..) | Def::TyForeign(..) | Def::TraitAlias(..) |
-                Def::AssociatedTy(..) | Def::PrimTy(..) | Def::Fn(..) | Def::Const(..) |
-                Def::Static(..) | Def::StructCtor(..) | Def::VariantCtor(..) | Def::Method(..) |
-                Def::AssociatedConst(..) | Def::Local(..) | Def::Upvar(..) | Def::Label(..) |
-                Def::Existential(..) | Def::AssociatedExistential(..) |
-                Def::Macro(..) | Def::GlobalAsm(..) | Def::Err =>
+                _ => {
                     bug!("TypeParametersFromOuterFunction should only be used with Def::SelfTy or \
                          Def::TyParam")
+                }
             }
 
             // Try to retrieve the span of the function signature and generate a new message with
@@ -271,7 +272,7 @@ fn resolve_struct_error<'sess, 'a>(resolver: &'sess Resolver,
             err
         }
         ResolutionError::VariableNotBoundInPattern(binding_error) => {
-            let target_sp = binding_error.target.iter().map(|x| *x).collect::<Vec<_>>();
+            let target_sp = binding_error.target.iter().cloned().collect::<Vec<_>>();
             let msp = MultiSpan::from_spans(target_sp.clone());
             let msg = format!("variable `{}` is not bound in all patterns", binding_error.name);
             let mut err = resolver.session.struct_span_err_with_code(
@@ -282,7 +283,7 @@ fn resolve_struct_error<'sess, 'a>(resolver: &'sess Resolver,
             for sp in target_sp {
                 err.span_label(sp, format!("pattern doesn't bind `{}`", binding_error.name));
             }
-            let origin_sp = binding_error.origin.iter().map(|x| *x).collect::<Vec<_>>();
+            let origin_sp = binding_error.origin.iter().cloned();
             for sp in origin_sp {
                 err.span_label(sp, "variable not in all patterns");
             }
@@ -399,7 +400,8 @@ fn resolve_struct_error<'sess, 'a>(resolver: &'sess Resolver,
             let mut err = struct_span_err!(resolver.session, span, E0128,
                                            "type parameters with a default cannot use \
                                             forward declared identifiers");
-            err.span_label(span, format!("defaulted type parameters cannot be forward declared"));
+            err.span_label(
+                span, "defaulted type parameters cannot be forward declared".to_string());
             err
         }
     }
@@ -689,7 +691,7 @@ impl<'tcx> Visitor<'tcx> for UsePlacementFinder {
 }
 
 /// This thing walks the whole crate in DFS manner, visiting each item, resolving names as it goes.
-impl<'a, 'tcx> Visitor<'tcx> for Resolver<'a> {
+impl<'a, 'tcx, 'cl> Visitor<'tcx> for Resolver<'a, 'cl> {
     fn visit_item(&mut self, item: &'tcx Item) {
         self.resolve_item(item);
     }
@@ -1119,7 +1121,7 @@ impl<'a> ToNameBinding<'a> for &'a NameBinding<'a> {
 
 #[derive(Clone, Debug)]
 enum NameBindingKind<'a> {
-    Def(Def),
+    Def(Def, /* is_macro_export */ bool),
     Module(Module<'a>),
     Import {
         binding: &'a NameBinding<'a>,
@@ -1163,7 +1165,7 @@ impl<'a> NameBinding<'a> {
 
     fn def(&self) -> Def {
         match self.kind {
-            NameBindingKind::Def(def) => def,
+            NameBindingKind::Def(def, _) => def,
             NameBindingKind::Module(module) => module.def().unwrap(),
             NameBindingKind::Import { binding, .. } => binding.def(),
             NameBindingKind::Ambiguity { .. } => Def::Err,
@@ -1178,7 +1180,7 @@ impl<'a> NameBinding<'a> {
         }
     }
 
-    fn get_macro(&self, resolver: &mut Resolver<'a>) -> Lrc<SyntaxExtension> {
+    fn get_macro<'b: 'a>(&self, resolver: &mut Resolver<'a, 'b>) -> Lrc<SyntaxExtension> {
         resolver.get_macro(self.def_ignoring_ambiguity())
     }
 
@@ -1193,8 +1195,8 @@ impl<'a> NameBinding<'a> {
 
     fn is_variant(&self) -> bool {
         match self.kind {
-            NameBindingKind::Def(Def::Variant(..)) |
-            NameBindingKind::Def(Def::VariantCtor(..)) => true,
+            NameBindingKind::Def(Def::Variant(..), _) |
+            NameBindingKind::Def(Def::VariantCtor(..), _) => true,
             _ => false,
         }
     }
@@ -1243,7 +1245,7 @@ impl<'a> NameBinding<'a> {
 
     fn is_macro_def(&self) -> bool {
         match self.kind {
-            NameBindingKind::Def(Def::Macro(..)) => true,
+            NameBindingKind::Def(Def::Macro(..), _) => true,
             _ => false,
         }
     }
@@ -1293,9 +1295,9 @@ impl PrimitiveTypeTable {
 /// The main resolver class.
 ///
 /// This is the visitor that walks the whole crate.
-pub struct Resolver<'a> {
+pub struct Resolver<'a, 'b: 'a> {
     session: &'a Session,
-    cstore: &'a dyn CrateStore,
+    cstore: &'a CStore,
 
     pub definitions: Definitions,
 
@@ -1391,7 +1393,7 @@ pub struct Resolver<'a> {
     /// true if `#![feature(use_extern_macros)]`
     use_extern_macros: bool,
 
-    crate_loader: &'a mut dyn CrateLoader,
+    crate_loader: &'a mut CrateLoader<'b>,
     macro_names: FxHashSet<Ident>,
     macro_prelude: FxHashMap<Name, &'a NameBinding<'a>>,
     pub all_macros: FxHashMap<Name, Def>,
@@ -1399,7 +1401,7 @@ pub struct Resolver<'a> {
     macro_map: FxHashMap<DefId, Lrc<SyntaxExtension>>,
     macro_defs: FxHashMap<Mark, DefId>,
     local_macro_def_scopes: FxHashMap<NodeId, Module<'a>>,
-    macro_exports: Vec<Export>,
+    macro_exports: Vec<Export>, // FIXME: Remove when `use_extern_macros` is stabilized
     pub whitelisted_legacy_custom_derives: Vec<Name>,
     pub found_unresolved_macro: bool,
 
@@ -1429,6 +1431,9 @@ pub struct Resolver<'a> {
 
     /// Only supposed to be used by rustdoc, otherwise should be false.
     pub ignore_extern_prelude_feature: bool,
+
+    /// Macro invocations in the whole crate that can expand into a `#[macro_export] macro_rules`.
+    unresolved_invocations_macro_export: FxHashSet<Mark>,
 }
 
 /// Nothing really interesting here, it just provides memory for the rest of the crate.
@@ -1472,7 +1477,7 @@ impl<'a> ResolverArenas<'a> {
     }
 }
 
-impl<'a, 'b: 'a> ty::DefIdTree for &'a Resolver<'b> {
+impl<'a, 'b: 'a, 'cl: 'b> ty::DefIdTree for &'a Resolver<'b, 'cl> {
     fn parent(self, id: DefId) -> Option<DefId> {
         match id.krate {
             LOCAL_CRATE => self.definitions.def_key(id.index).parent,
@@ -1483,7 +1488,7 @@ impl<'a, 'b: 'a> ty::DefIdTree for &'a Resolver<'b> {
 
 /// This interface is used through the AST→HIR step, to embed full paths into the HIR. After that
 /// the resolver is no longer needed as all the relevant information is inline.
-impl<'a> hir::lowering::Resolver for Resolver<'a> {
+impl<'a, 'cl> hir::lowering::Resolver for Resolver<'a, 'cl> {
     fn resolve_hir_path(&mut self, path: &mut hir::Path, is_value: bool) {
         self.resolve_hir_path_cb(path, is_value,
                                  |resolver, span, error| resolve_error(resolver, span, error))
@@ -1536,7 +1541,7 @@ impl<'a> hir::lowering::Resolver for Resolver<'a> {
     }
 }
 
-impl<'a> Resolver<'a> {
+impl<'a, 'crateloader> Resolver<'a, 'crateloader> {
     /// Rustdoc uses this to resolve things in a recoverable way. ResolutionError<'a>
     /// isn't something that can be returned because it can't be made to live that long,
     /// and also it's a private type. Fortunately rustdoc doesn't need to know the error,
@@ -1602,15 +1607,15 @@ impl<'a> Resolver<'a> {
     }
 }
 
-impl<'a> Resolver<'a> {
+impl<'a, 'crateloader: 'a> Resolver<'a, 'crateloader> {
     pub fn new(session: &'a Session,
-               cstore: &'a dyn CrateStore,
+               cstore: &'a CStore,
                krate: &Crate,
                crate_name: &str,
                make_glob_map: MakeGlobMap,
-               crate_loader: &'a mut dyn CrateLoader,
+               crate_loader: &'a mut CrateLoader<'crateloader>,
                arenas: &'a ResolverArenas<'a>)
-               -> Resolver<'a> {
+               -> Resolver<'a, 'crateloader> {
         let root_def_id = DefId::local(CRATE_DEF_INDEX);
         let root_module_kind = ModuleKind::Def(Def::Mod(root_def_id), keywords::Invalid.name());
         let graph_root = arenas.alloc_module(ModuleData {
@@ -1703,15 +1708,13 @@ impl<'a> Resolver<'a> {
 
             arenas,
             dummy_binding: arenas.alloc_name_binding(NameBinding {
-                kind: NameBindingKind::Def(Def::Err),
+                kind: NameBindingKind::Def(Def::Err, false),
                 expansion: Mark::root(),
                 span: DUMMY_SP,
                 vis: ty::Visibility::Public,
             }),
 
-            // The `proc_macro` and `decl_macro` features imply `use_extern_macros`
-            use_extern_macros:
-                features.use_extern_macros || features.decl_macro,
+            use_extern_macros: features.use_extern_macros(),
 
             crate_loader,
             macro_names: FxHashSet(),
@@ -1733,6 +1736,7 @@ impl<'a> Resolver<'a> {
             current_type_ascription: Vec::new(),
             injected_crate: None,
             ignore_extern_prelude_feature: false,
+            unresolved_invocations_macro_export: FxHashSet(),
         }
     }
 
@@ -1843,6 +1847,7 @@ impl<'a> Resolver<'a> {
                                       path_span: Span)
                                       -> Option<LexicalScopeBinding<'a>> {
         let record_used = record_used_id.is_some();
+        assert!(ns == TypeNS  || ns == ValueNS);
         if ns == TypeNS {
             ident.span = if ident.name == keywords::SelfType.name() {
                 // FIXME(jseyfried) improve `Self` hygiene
@@ -1919,8 +1924,9 @@ impl<'a> Resolver<'a> {
                     return Some(LexicalScopeBinding::Item(binding))
                 }
                 _ if poisoned.is_some() => break,
-                Err(Undetermined) => return None,
-                Err(Determined) => {}
+                Err(Determined) => continue,
+                Err(Undetermined) =>
+                    span_bug!(ident.span, "undetermined resolution during main resolution pass"),
             }
         }
 
@@ -1939,6 +1945,11 @@ impl<'a> Resolver<'a> {
                 self.populate_module_if_necessary(crate_root);
 
                 let binding = (crate_root, ty::Visibility::Public,
+                               ident.span, Mark::root()).to_name_binding(self.arenas);
+                return Some(LexicalScopeBinding::Item(binding));
+            }
+            if ns == TypeNS && is_known_tool(ident.name) {
+                let binding = (Def::ToolMod, ty::Visibility::Public,
                                ident.span, Mark::root()).to_name_binding(self.arenas);
                 return Some(LexicalScopeBinding::Item(binding));
             }
@@ -2892,16 +2903,16 @@ impl<'a> Resolver<'a> {
                 let item_str = path[path.len() - 1];
                 let item_span = path[path.len() - 1].span;
                 let (mod_prefix, mod_str) = if path.len() == 1 {
-                    (format!(""), format!("this scope"))
+                    (String::new(), "this scope".to_string())
                 } else if path.len() == 2 && path[0].name == keywords::CrateRoot.name() {
-                    (format!(""), format!("the crate root"))
+                    (String::new(), "the crate root".to_string())
                 } else {
                     let mod_path = &path[..path.len() - 1];
                     let mod_prefix = match this.resolve_path(mod_path, Some(TypeNS),
                                                              false, span, CrateLint::No) {
                         PathResult::Module(module) => module.def(),
                         _ => None,
-                    }.map_or(format!(""), |def| format!("{} ", def.kind_name()));
+                    }.map_or(String::new(), |def| format!("{} ", def.kind_name()));
                     (mod_prefix, format!("`{}`", names_to_string(mod_path)))
                 };
                 (format!("cannot find {} `{}` in {}{}", expected, item_str, mod_prefix, mod_str),
@@ -3459,7 +3470,7 @@ impl<'a> Resolver<'a> {
                     path[0].name != keywords::CrateRoot.name() ||
                name == keywords::Crate.name() && path.len() == 1 {
                 let name_str = if name == keywords::CrateRoot.name() {
-                    format!("crate root")
+                    "crate root".to_string()
                 } else {
                     format!("`{}`", name)
                 };
@@ -3502,6 +3513,8 @@ impl<'a> Resolver<'a> {
                     let maybe_assoc = opt_ns != Some(MacroNS) && PathSource::Type.is_expected(def);
                     if let Some(next_module) = binding.module() {
                         module = Some(next_module);
+                    } else if def == Def::ToolMod && i + 1 != path.len() {
+                        return PathResult::NonModule(PathResolution::new(Def::NonMacroAttr))
                     } else if def == Def::Err {
                         return PathResult::NonModule(err_path_resolution());
                     } else if opt_ns.is_some() && (is_last || maybe_assoc) {
@@ -3833,9 +3846,9 @@ impl<'a> Resolver<'a> {
             }
             // Add primitive types to the mix
             if filter_fn(Def::PrimTy(TyBool)) {
-                for (name, _) in &self.primitive_type_table.primitive_types {
-                    names.push(*name);
-                }
+                names.extend(
+                    self.primitive_type_table.primitive_types.iter().map(|(name, _)| name)
+                )
             }
         } else {
             // Search in module.

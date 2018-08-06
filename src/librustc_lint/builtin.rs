@@ -40,6 +40,7 @@ use lint::{LateContext, LintContext, LintArray};
 use lint::{LintPass, LateLintPass, EarlyLintPass, EarlyContext};
 
 use std::collections::HashSet;
+use rustc::util::nodemap::FxHashSet;
 
 use syntax::tokenstream::{TokenTree, TokenStream};
 use syntax::ast;
@@ -83,7 +84,12 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for WhileTrue {
                         let msg = "denote infinite loops with `loop { ... }`";
                         let condition_span = cx.tcx.sess.codemap().def_span(e.span);
                         let mut err = cx.struct_span_lint(WHILE_TRUE, condition_span, msg);
-                        err.span_suggestion_short(condition_span, "use `loop`", "loop".to_owned());
+                        err.span_suggestion_short_with_applicability(
+                            condition_span,
+                            "use `loop`",
+                            "loop".to_owned(),
+                            Applicability::MachineApplicable
+                        );
                         err.emit();
                     }
                 }
@@ -190,7 +196,12 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for NonShorthandFieldPatterns {
                                      fieldpat.span,
                                      &format!("the `{}:` in this pattern is redundant", ident));
                         let subspan = cx.tcx.sess.codemap().span_through_char(fieldpat.span, ':');
-                        err.span_suggestion_short(subspan, "remove this", format!("{}", ident));
+                        err.span_suggestion_short_with_applicability(
+                            subspan,
+                            "remove this",
+                            ident.to_string(),
+                            Applicability::MachineApplicable
+                        );
                         err.emit();
                     }
                 }
@@ -701,16 +712,17 @@ impl EarlyLintPass for BadRepr {
                         attr.span,
                         "`repr` attribute isn't configurable with a literal",
                     );
-                    match format!("{}", lit).as_ref() {
+                    match lit.to_string().as_ref() {
                         | "C" | "packed" | "rust" | "transparent"
                         | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
                         | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => {
                             // if the literal could have been a valid `repr` arg,
                             // suggest the correct syntax
-                            warn.span_suggestion(
+                            warn.span_suggestion_with_applicability(
                                 attr.span,
                                 "give `repr` a hint",
                                 repr_str(&lit.as_str()),
+                                Applicability::MachineApplicable
                             );
                             suggested = true;
                         }
@@ -778,7 +790,12 @@ impl EarlyLintPass for DeprecatedAttr {
                     let msg = format!("use of deprecated attribute `{}`: {}. See {}",
                                       name, reason, link);
                     let mut err = cx.struct_span_lint(DEPRECATED, attr.span, &msg);
-                    err.span_suggestion_short(attr.span, "remove this attribute", "".to_owned());
+                    err.span_suggestion_short_with_applicability(
+                        attr.span,
+                        "remove this attribute",
+                        "".to_owned(),
+                        Applicability::MachineApplicable
+                    );
                     err.emit();
                 }
                 return;
@@ -1200,7 +1217,12 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for InvalidNoMangleItems {
                 }
             };
             if let Some(replacement) = suggestion {
-                err.span_suggestion(vis.span, "try making it public", replacement);
+                err.span_suggestion_with_applicability(
+                    vis.span,
+                    "try making it public",
+                    replacement,
+                    Applicability::MachineApplicable
+                );
             }
         };
 
@@ -1224,9 +1246,14 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for InvalidNoMangleItems {
                                                                   it.span,
                                                                   "functions generic over \
                                                                    types must be mangled");
-                                err.span_suggestion_short(no_mangle_attr.span,
-                                                          "remove this attribute",
-                                                          "".to_owned());
+                                err.span_suggestion_short_with_applicability(
+                                    no_mangle_attr.span,
+                                    "remove this attribute",
+                                    "".to_owned(),
+                                    // Use of `#[no_mangle]` suggests FFI intent; correct
+                                    // fix may be to monomorphize source by hand
+                                    Applicability::MaybeIncorrect
+                                );
                                 err.emit();
                                 break;
                             }
@@ -1256,9 +1283,12 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for InvalidNoMangleItems {
                         .unwrap_or(0) as u32;
                     // `const` is 5 chars
                     let const_span = it.span.with_hi(BytePos(it.span.lo().0 + start + 5));
-                    err.span_suggestion(const_span,
-                                        "try a static value",
-                                        "pub static".to_owned());
+                    err.span_suggestion_with_applicability(
+                        const_span,
+                        "try a static value",
+                        "pub static".to_owned(),
+                        Applicability::MachineApplicable
+                    );
                     err.emit();
                 }
             }
@@ -1576,20 +1606,83 @@ impl LintPass for UnusedBrokenConst {
     }
 }
 
+fn validate_const<'a, 'tcx>(
+    tcx: ty::TyCtxt<'a, 'tcx, 'tcx>,
+    constant: &ty::Const<'tcx>,
+    param_env: ty::ParamEnv<'tcx>,
+    gid: ::rustc::mir::interpret::GlobalId<'tcx>,
+    what: &str,
+) {
+    let mut ecx = ::rustc_mir::interpret::mk_eval_cx(tcx, gid.instance, param_env).unwrap();
+    let result = (|| {
+        let val = ecx.const_to_value(constant.val)?;
+        use rustc_target::abi::LayoutOf;
+        let layout = ecx.layout_of(constant.ty)?;
+        let place = ecx.allocate_place_for_value(val, layout, None)?;
+        let ptr = place.to_ptr()?;
+        let mut todo = vec![(ptr, layout.ty, String::new())];
+        let mut seen = FxHashSet();
+        seen.insert((ptr, layout.ty));
+        while let Some((ptr, ty, path)) = todo.pop() {
+            let layout = ecx.layout_of(ty)?;
+            ecx.validate_ptr_target(
+                ptr,
+                layout.align,
+                layout,
+                path,
+                &mut seen,
+                &mut todo,
+            )?;
+        }
+        Ok(())
+    })();
+    if let Err(err) = result {
+        let (trace, span) = ecx.generate_stacktrace(None);
+        let err = ::rustc::mir::interpret::ConstEvalErr {
+            error: err,
+            stacktrace: trace,
+            span,
+        };
+        let err = err.struct_error(
+            tcx.at(span),
+            &format!("this {} likely exhibits undefined behavior", what),
+        );
+        if let Some(mut err) = err {
+            err.note("The rules on what exactly is undefined behavior aren't clear, \
+                so this check might be overzealous. Please open an issue on the rust compiler \
+                repository if you believe it should not be considered undefined behavior",
+            );
+            err.emit();
+        }
+    }
+}
+
 fn check_const(cx: &LateContext, body_id: hir::BodyId, what: &str) {
     let def_id = cx.tcx.hir.body_owner_def_id(body_id);
-    let param_env = cx.tcx.param_env(def_id);
+    let is_static = cx.tcx.is_static(def_id).is_some();
+    let param_env = if is_static {
+        // Use the same param_env as `codegen_static_initializer`, to reuse the cache.
+        ty::ParamEnv::reveal_all()
+    } else {
+        cx.tcx.param_env(def_id)
+    };
     let cid = ::rustc::mir::interpret::GlobalId {
         instance: ty::Instance::mono(cx.tcx, def_id),
         promoted: None
     };
-    if let Err(err) = cx.tcx.const_eval(param_env.and(cid)) {
-        let span = cx.tcx.def_span(def_id);
-        err.report_as_lint(
-            cx.tcx.at(span),
-            &format!("this {} cannot be used", what),
-            cx.current_lint_root(),
-        );
+    match cx.tcx.const_eval(param_env.and(cid)) {
+        Ok(val) => validate_const(cx.tcx, val, param_env, cid, what),
+        Err(err) => {
+            // errors for statics are already reported directly in the query, avoid duplicates
+            if !is_static {
+                let span = cx.tcx.def_span(def_id);
+                err.report_as_lint(
+                    cx.tcx.at(span),
+                    &format!("this {} cannot be used", what),
+                    cx.current_lint_root(),
+                );
+            }
+        },
     }
 }
 
@@ -1609,6 +1702,9 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedBrokenConst {
         match it.node {
             hir::ItemKind::Const(_, body_id) => {
                 check_const(cx, body_id, "constant");
+            },
+            hir::ItemKind::Static(_, _, body_id) => {
+                check_const(cx, body_id, "static");
             },
             hir::ItemKind::Ty(ref ty, _) => hir::intravisit::walk_ty(
                 &mut UnusedBrokenConstVisitor(cx),
@@ -1830,12 +1926,16 @@ impl Async2018 {
             span,
             "`async` is a keyword in the 2018 edition",
         );
-        lint.span_suggestion_with_applicability(
-            span,
-            "you can use a raw identifier to stay compatible",
-            "r#async".to_string(),
-            Applicability::MachineApplicable,
-        );
+
+        // Don't suggest about raw identifiers if the feature isn't active
+        if cx.sess.features_untracked().raw_identifiers {
+            lint.span_suggestion_with_applicability(
+                span,
+                "you can use a raw identifier to stay compatible",
+                "r#async".to_string(),
+                Applicability::MachineApplicable,
+            );
+        }
         lint.emit()
     }
 }

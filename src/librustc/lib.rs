@@ -36,8 +36,6 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![deny(bare_trait_objects)]
-
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
@@ -75,6 +73,7 @@
 #![feature(in_band_lifetimes)]
 #![feature(macro_at_most_once_rep)]
 #![feature(inclusive_range_methods)]
+#![feature(crate_in_paths)]
 
 #![recursion_limit="512"]
 
@@ -166,6 +165,7 @@ pub mod util {
     pub mod nodemap;
     pub mod fs;
     pub mod time_graph;
+    pub mod profiling;
 }
 
 // A private module so that macro-expanded idents like

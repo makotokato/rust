@@ -32,7 +32,7 @@ struct AstValidator<'a> {
 
 impl<'a> AstValidator<'a> {
     fn err_handler(&self) -> &errors::Handler {
-        &self.session.parse_sess.span_diagnostic
+        &self.session.diagnostic()
     }
 
     fn check_lifetime(&self, ident: Ident) {
@@ -147,7 +147,7 @@ impl<'a> AstValidator<'a> {
         }
     }
 
-    fn check_late_bound_lifetime_defs(&self, params: &Vec<GenericParam>) {
+    fn check_late_bound_lifetime_defs(&self, params: &[GenericParam]) {
         // Check only lifetime parameters are present and that the lifetime
         // parameters that are present have no bounds.
         let non_lt_param_spans: Vec<_> = params.iter().filter_map(|param| match param.kind {

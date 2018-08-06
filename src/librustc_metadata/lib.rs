@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![deny(bare_trait_objects)]
-
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
@@ -39,6 +37,7 @@ extern crate serialize as rustc_serialize; // used by deriving
 extern crate rustc_errors as errors;
 extern crate syntax_ext;
 extern crate proc_macro;
+extern crate rustc_metadata_utils;
 
 #[macro_use]
 extern crate rustc;

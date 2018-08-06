@@ -13,7 +13,6 @@
        html_root_url = "https://doc.rust-lang.org/nightly/")]
 #![feature(custom_attribute)]
 #![allow(unused_attributes)]
-#![deny(bare_trait_objects)]
 
 #![recursion_limit="256"]
 
@@ -45,7 +44,7 @@ use rustc::hir::def::Def as HirDef;
 use rustc::hir::map::{Node, NodeTraitItem, NodeImplItem};
 use rustc::hir::def_id::{DefId, LOCAL_CRATE};
 use rustc::middle::cstore::ExternCrate;
-use rustc::session::config::CrateType::CrateTypeExecutable;
+use rustc::session::config::CrateType;
 use rustc::ty::{self, TyCtxt};
 use rustc_typeck::hir_ty_to_ty;
 
@@ -424,7 +423,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                             let mut qualname = String::from("<");
                             qualname.push_str(&self.tcx.hir.node_to_pretty_string(ty.id));
 
-                            let mut trait_id = self.tcx.trait_id_of_impl(impl_id);
+                            let trait_id = self.tcx.trait_id_of_impl(impl_id);
                             let mut decl_id = None;
                             let mut docs = String::new();
                             let mut attrs = vec![];
@@ -812,6 +811,8 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
             HirDef::Label(..) |
             HirDef::Macro(..) |
             HirDef::GlobalAsm(..) |
+            HirDef::ToolMod |
+            HirDef::NonMacroAttr |
             HirDef::Err => None,
         }
     }
@@ -1047,7 +1048,7 @@ impl<'a> DumpHandler<'a> {
                 let executable = sess.crate_types
                     .borrow()
                     .iter()
-                    .any(|ct| *ct == CrateTypeExecutable);
+                    .any(|ct| *ct == CrateType::Executable);
                 let mut out_name = if executable {
                     "".to_owned()
                 } else {

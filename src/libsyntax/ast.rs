@@ -23,6 +23,7 @@ use ext::hygiene::{Mark, SyntaxContext};
 use print::pprust;
 use ptr::P;
 use rustc_data_structures::indexed_vec;
+use rustc_data_structures::indexed_vec::Idx;
 use symbol::{Symbol, keywords};
 use tokenstream::{ThinTokenStream, TokenStream};
 
@@ -500,10 +501,7 @@ impl Pat {
             PatKind::Slice(pats, None, _) if pats.len() == 1 =>
                 pats[0].to_ty().map(TyKind::Slice)?,
             PatKind::Tuple(pats, None) => {
-                let mut tys = Vec::new();
-                for pat in pats {
-                    tys.push(pat.to_ty()?);
-                }
+                let tys = pats.iter().map(|pat| pat.to_ty()).collect::<Option<Vec<_>>>()?;
                 TyKind::Tup(tys)
             }
             _ => return None,
@@ -949,10 +947,7 @@ impl Expr {
             ExprKind::Array(exprs) if exprs.len() == 1 =>
                 exprs[0].to_ty().map(TyKind::Slice)?,
             ExprKind::Tup(exprs) => {
-                let mut tys = Vec::new();
-                for expr in exprs {
-                    tys.push(expr.to_ty()?);
-                }
+                let tys = exprs.iter().map(|expr| expr.to_ty()).collect::<Option<Vec<_>>>()?;
                 TyKind::Tup(tys)
             }
             ExprKind::Binary(binop, lhs, rhs) if binop.node == BinOpKind::Add =>
@@ -1916,8 +1911,17 @@ pub enum AttrStyle {
     Inner,
 }
 
-#[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug, Copy)]
+#[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug, PartialOrd, Ord, Copy)]
 pub struct AttrId(pub usize);
+
+impl Idx for AttrId {
+    fn new(idx: usize) -> Self {
+        AttrId(idx)
+    }
+    fn index(self) -> usize {
+        self.0
+    }
+}
 
 /// Meta-data associated with an item
 /// Doc-comments are promoted to attributes that have is_sugared_doc = true

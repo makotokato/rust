@@ -70,7 +70,6 @@ This API is completely unstable and subject to change.
       html_root_url = "https://doc.rust-lang.org/nightly/")]
 
 #![allow(non_camel_case_types)]
-#![deny(bare_trait_objects)]
 
 #![feature(box_patterns)]
 #![feature(box_syntax)]
@@ -110,6 +109,7 @@ use rustc::ty::subst::Substs;
 use rustc::ty::{self, Ty, TyCtxt};
 use rustc::ty::query::Providers;
 use rustc::traits::{ObligationCause, ObligationCauseCode, TraitEngine, TraitEngineExt};
+use rustc::util::profiling::ProfileCategory;
 use session::{CompileIncomplete, config};
 use util::common::time;
 
@@ -192,9 +192,9 @@ fn check_main_fn_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                         hir::ItemKind::Fn(.., ref generics, _) => {
                             let mut error = false;
                             if !generics.params.is_empty() {
-                                let msg = format!("`main` function is not allowed to have generic \
-                                                   parameters");
-                                let label = format!("`main` cannot have generic parameters");
+                                let msg = "`main` function is not allowed to have generic \
+                                           parameters".to_string();
+                                let label = "`main` cannot have generic parameters".to_string();
                                 struct_span_err!(tcx.sess, generics.span, E0131, "{}", msg)
                                     .span_label(generics.span, label)
                                     .emit();
@@ -318,8 +318,8 @@ fn check_start_fn_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 fn check_for_entry_fn<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
     if let Some((id, sp, entry_type)) = *tcx.sess.entry_fn.borrow() {
         match entry_type {
-            config::EntryMain => check_main_fn_ty(tcx, id, sp),
-            config::EntryStart => check_start_fn_ty(tcx, id, sp),
+            config::EntryFnType::Main => check_main_fn_ty(tcx, id, sp),
+            config::EntryFnType::Start => check_start_fn_ty(tcx, id, sp),
         }
     }
 }
@@ -335,6 +335,8 @@ pub fn provide(providers: &mut Providers) {
 pub fn check_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>)
                              -> Result<(), CompileIncomplete>
 {
+    tcx.sess.profiler(|p| p.start_activity(ProfileCategory::TypeChecking));
+
     // this ensures that later parts of type checking can assume that items
     // have valid types and not error
     tcx.sess.track_errors(|| {
@@ -371,6 +373,8 @@ pub fn check_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>)
 
     check_unused::check_crate(tcx);
     check_for_entry_fn(tcx);
+
+    tcx.sess.profiler(|p| p.end_activity(ProfileCategory::TypeChecking));
 
     tcx.sess.compile_status()
 }

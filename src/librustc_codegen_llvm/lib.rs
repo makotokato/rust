@@ -20,17 +20,23 @@
 
 #![feature(box_patterns)]
 #![feature(box_syntax)]
+#![feature(crate_visibility_modifier)]
 #![feature(custom_attribute)]
+#![feature(extern_types)]
 #![feature(fs_read_write)]
+#![feature(in_band_lifetimes)]
 #![allow(unused_attributes)]
-#![deny(bare_trait_objects)]
 #![feature(libc)]
 #![feature(quote)]
 #![feature(range_contains)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(slice_sort_by_cached_key)]
 #![feature(optin_builtin_traits)]
+#![feature(concat_idents)]
+#![feature(link_args)]
+#![feature(static_nobundle)]
 
+use back::write::create_target_machine;
 use rustc::dep_graph::WorkProduct;
 use syntax_pos::symbol::Symbol;
 
@@ -47,7 +53,7 @@ extern crate rustc_target;
 #[macro_use] extern crate rustc_data_structures;
 extern crate rustc_demangle;
 extern crate rustc_incremental;
-extern crate rustc_llvm as llvm;
+extern crate rustc_llvm;
 extern crate rustc_platform_intrinsics as intrinsics;
 extern crate rustc_codegen_utils;
 
@@ -78,6 +84,7 @@ use rustc::session::config::{OutputFilenames, OutputType, PrintRequest};
 use rustc::ty::{self, TyCtxt};
 use rustc::util::time_graph;
 use rustc::util::nodemap::{FxHashSet, FxHashMap};
+use rustc::util::profiling::ProfileCategory;
 use rustc_mir::monomorphize;
 use rustc_codegen_utils::codegen_backend::CodegenBackend;
 
@@ -111,6 +118,7 @@ mod debuginfo;
 mod declare;
 mod glue;
 mod intrinsic;
+pub mod llvm;
 mod llvm_util;
 mod metadata;
 mod meth;
@@ -233,10 +241,12 @@ impl CodegenBackend for LlvmCodegenBackend {
 
         // Run the linker on any artifacts that resulted from the LLVM run.
         // This should produce either a finished executable or library.
+        sess.profiler(|p| p.start_activity(ProfileCategory::Linking));
         time(sess, "linking", || {
             back::link::link_binary(sess, &ongoing_codegen,
                                     outputs, &ongoing_codegen.crate_name.as_str());
         });
+        sess.profiler(|p| p.end_activity(ProfileCategory::Linking));
 
         // Now that we won't touch anything in the incremental compilation directory
         // any more, we can finalize it (which involves renaming it)
@@ -336,22 +346,41 @@ enum ModuleSource {
     Codegened(ModuleLlvm),
 }
 
-#[derive(Debug)]
 struct ModuleLlvm {
-    llcx: llvm::ContextRef,
-    llmod: llvm::ModuleRef,
-    tm: llvm::TargetMachineRef,
+    llcx: &'static mut llvm::Context,
+    llmod_raw: *const llvm::Module,
+    tm: &'static mut llvm::TargetMachine,
 }
 
 unsafe impl Send for ModuleLlvm { }
 unsafe impl Sync for ModuleLlvm { }
 
+impl ModuleLlvm {
+    fn new(sess: &Session, mod_name: &str) -> Self {
+        unsafe {
+            let llcx = llvm::LLVMRustContextCreate(sess.fewer_names());
+            let llmod_raw = context::create_module(sess, llcx, mod_name) as *const _;
+
+            ModuleLlvm {
+                llmod_raw,
+                llcx,
+                tm: create_target_machine(sess, false),
+            }
+        }
+    }
+
+    fn llmod(&self) -> &llvm::Module {
+        unsafe {
+            &*self.llmod_raw
+        }
+    }
+}
+
 impl Drop for ModuleLlvm {
     fn drop(&mut self) {
         unsafe {
-            llvm::LLVMDisposeModule(self.llmod);
-            llvm::LLVMContextDispose(self.llcx);
-            llvm::LLVMRustDisposeTargetMachine(self.tm);
+            llvm::LLVMContextDispose(&mut *(self.llcx as *mut _));
+            llvm::LLVMRustDisposeTargetMachine(&mut *(self.tm as *mut _));
         }
     }
 }

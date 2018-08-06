@@ -962,19 +962,21 @@ fn generics_of<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             &["<closure_kind>", "<closure_signature>"][..]
         };
 
-        for (i, &arg) in dummy_args.iter().enumerate() {
-            params.push(ty::GenericParamDef {
-                index: type_start + i as u32,
-                name: Symbol::intern(arg).as_interned_str(),
-                def_id,
-                pure_wrt_drop: false,
-                kind: ty::GenericParamDefKind::Type {
-                    has_default: false,
-                    object_lifetime_default: rl::Set1::Empty,
-                    synthetic: None,
-                },
-            });
-        }
+        params.extend(
+            dummy_args.iter().enumerate().map(|(i, &arg)|
+                ty::GenericParamDef {
+                    index: type_start + i as u32,
+                    name: Symbol::intern(arg).as_interned_str(),
+                    def_id,
+                    pure_wrt_drop: false,
+                    kind: ty::GenericParamDefKind::Type {
+                        has_default: false,
+                        object_lifetime_default: rl::Set1::Empty,
+                        synthetic: None,
+                    },
+                }
+            )
+        );
 
         tcx.with_freevars(node_id, |fv| {
             params.extend(fv.iter().zip((dummy_args.len() as u32)..).map(|(_, i)| {
@@ -1046,12 +1048,12 @@ fn type_of<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                     tcx.mk_fn_def(def_id, substs)
                 }
                 ImplItemKind::Const(ref ty, _) => icx.to_ty(ty),
-                ImplItemKind::Existential(ref _bounds) => {
+                ImplItemKind::Existential(_) => {
                     if tcx.impl_trait_ref(tcx.hir.get_parent_did(node_id)).is_none() {
                         report_assoc_ty_on_inherent_impl(tcx, item.span);
                     }
-                    // FIXME(oli-obk) implement existential types in trait impls
-                    unimplemented!()
+
+                    find_existential_constraints(tcx, def_id)
                 }
                 ImplItemKind::Type(ref ty) => {
                     if tcx.impl_trait_ref(tcx.hir.get_parent_did(node_id)).is_none() {
@@ -1186,8 +1188,10 @@ fn find_existential_constraints<'a, 'tcx>(
     }
     impl<'a, 'tcx> ConstraintLocator<'a, 'tcx> {
         fn check(&mut self, def_id: DefId) {
+            trace!("checking {:?}", def_id);
             // don't try to check items that cannot possibly constrain the type
             if !self.tcx.has_typeck_tables(def_id) {
+                trace!("no typeck tables for {:?}", def_id);
                 return;
             }
             let ty = self
@@ -1244,9 +1248,11 @@ fn find_existential_constraints<'a, 'tcx>(
     let mut locator = ConstraintLocator { def_id, tcx, found: None };
     let node_id = tcx.hir.as_local_node_id(def_id).unwrap();
     let parent = tcx.hir.get_parent(node_id);
+    trace!("parent_id: {:?}", parent);
     if parent == ast::CRATE_NODE_ID {
         intravisit::walk_crate(&mut locator, tcx.hir.krate());
     } else {
+        trace!("parent: {:?}", tcx.hir.get(parent));
         match tcx.hir.get(parent) {
             NodeItem(ref it) => intravisit::walk_item(&mut locator, it),
             NodeImplItem(ref it) => intravisit::walk_impl_item(&mut locator, it),
@@ -1485,7 +1491,23 @@ fn explicit_predicates_of<'a, 'tcx>(
             &item.generics
         }
 
-        NodeImplItem(item) => &item.generics,
+        NodeImplItem(item) => match item.node {
+            ImplItemKind::Existential(ref bounds) => {
+                let substs = Substs::identity_for_item(tcx, def_id);
+                let anon_ty = tcx.mk_anon(def_id, substs);
+
+                // Collect the bounds, i.e. the `A+B+'c` in `impl A+B+'c`.
+                let bounds = compute_bounds(&icx,
+                                            anon_ty,
+                                            bounds,
+                                            SizedByDefault::Yes,
+                                            tcx.def_span(def_id));
+
+                predicates.extend(bounds.predicates(tcx, anon_ty));
+                &item.generics
+            },
+            _ => &item.generics,
+        }
 
         NodeItem(item) => {
             match item.node {
@@ -1631,10 +1653,7 @@ fn explicit_predicates_of<'a, 'tcx>(
                                                                     &mut projections);
 
                             predicates.push(trait_ref.to_predicate());
-
-                            for projection in &projections {
-                                predicates.push(projection.to_predicate());
-                            }
+                            predicates.extend(projections.iter().map(|p| p.to_predicate()));
                         }
 
                         &hir::GenericBound::Outlives(ref lifetime) => {

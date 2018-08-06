@@ -27,8 +27,6 @@
 // this crate, which relies on this attribute (rather than the value of `--crate-name` passed by
 // cargo) to detect this crate.
 
-#![deny(bare_trait_objects)]
-
 #![crate_name = "test"]
 #![unstable(feature = "test", issue = "27812")]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
@@ -66,7 +64,6 @@ use std::fmt;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io;
-use std::iter::repeat;
 use std::path::PathBuf;
 use std::process::Termination;
 use std::sync::mpsc::{channel, Sender};
@@ -145,7 +142,7 @@ impl TestDesc {
     fn padded_name(&self, column_count: usize, align: NamePadding) -> String {
         let mut name = String::from(self.name.as_slice());
         let fill = column_count.saturating_sub(name.len());
-        let pad = repeat(" ").take(fill).collect::<String>();
+        let pad = " ".repeat(fill);
         match align {
             PadNone => name,
             PadOnRight => {
@@ -560,7 +557,7 @@ pub fn parse_opts(args: &[String]) -> Option<OptRes> {
 
     let test_threads = match matches.opt_str("test-threads") {
         Some(n_str) => match n_str.parse::<usize>() {
-            Ok(0) => return Some(Err(format!("argument for --test-threads must not be 0"))),
+            Ok(0) => return Some(Err("argument for --test-threads must not be 0".to_string())),
             Ok(n) => Some(n),
             Err(e) => {
                 return Some(Err(format!(

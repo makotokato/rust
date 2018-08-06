@@ -528,9 +528,7 @@ impl EmitterWriter {
 
         // If there are no annotations or the only annotations on this line are
         // MultilineLine, then there's only code being shown, stop processing.
-        if line.annotations.is_empty() || line.annotations.iter()
-            .filter(|a| !a.is_line()).collect::<Vec<_>>().len() == 0
-        {
+        if line.annotations.iter().all(|a| a.is_line()) {
             return vec![];
         }
 
@@ -749,7 +747,7 @@ impl EmitterWriter {
         max
     }
 
-    fn get_max_line_num(&mut self, span: &MultiSpan, children: &Vec<SubDiagnostic>) -> usize {
+    fn get_max_line_num(&mut self, span: &MultiSpan, children: &[SubDiagnostic]) -> usize {
         let mut max = 0;
 
         let primary = self.get_multispan_max_line_num(span);
@@ -901,9 +899,7 @@ impl EmitterWriter {
         //    |  |   length of label
         //    |  magic `3`
         //    `max_line_num_len`
-        let padding = (0..padding + label.len() + 5)
-            .map(|_| " ")
-            .collect::<String>();
+        let padding = " ".repeat(padding + label.len() + 5);
 
         /// Return whether `style`, or the override if present and the style is `NoStyle`.
         fn style_or_override(style: Style, override_style: Option<Style>) -> Style {
@@ -954,7 +950,7 @@ impl EmitterWriter {
 
     fn emit_message_default(&mut self,
                             msp: &MultiSpan,
-                            msg: &Vec<(String, Style)>,
+                            msg: &[(String, Style)],
                             code: &Option<DiagnosticId>,
                             level: &Level,
                             max_line_num_len: usize,
@@ -1317,10 +1313,10 @@ impl EmitterWriter {
 
     fn emit_messages_default(&mut self,
                              level: &Level,
-                             message: &Vec<(String, Style)>,
+                             message: &[(String, Style)],
                              code: &Option<DiagnosticId>,
                              span: &MultiSpan,
-                             children: &Vec<SubDiagnostic>,
+                             children: &[SubDiagnostic],
                              suggestions: &[CodeSuggestion]) {
         let max_line_num_len = if self.ui_testing {
             ANONYMIZED_LINE_NUM.len()
@@ -1433,7 +1429,7 @@ fn overlaps(a1: &Annotation, a2: &Annotation, padding: usize) -> bool {
     num_overlap(a1.start_col, a1.end_col + padding, a2.start_col, a2.end_col, false)
 }
 
-fn emit_to_destination(rendered_buffer: &Vec<Vec<StyledString>>,
+fn emit_to_destination(rendered_buffer: &[Vec<StyledString>],
                        lvl: &Level,
                        dst: &mut Destination,
                        short_message: bool)

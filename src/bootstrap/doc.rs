@@ -28,7 +28,7 @@ use build_helper::up_to_date;
 
 use util::symlink_dir;
 use builder::{Builder, Compiler, RunConfig, ShouldRun, Step};
-use tool::{self, prepare_tool_cargo, Tool};
+use tool::{self, prepare_tool_cargo, Tool, SourceType};
 use compile;
 use cache::{INTERNER, Interned};
 use config::Config;
@@ -489,7 +489,7 @@ impl Step for Std {
         // Keep a whitelist so we do not build internal stdlib crates, these will be
         // build by the rustc step later if enabled.
         cargo.arg("--no-deps");
-        for krate in &["alloc", "core", "std", "std_unicode"] {
+        for krate in &["alloc", "core", "std"] {
             cargo.arg("-p").arg(krate);
             // Create all crate output directories first to make sure rustdoc uses
             // relative links.
@@ -686,7 +686,7 @@ impl Step for Rustc {
         };
 
         if !builder.config.compiler_docs {
-            builder.info(&format!("\tskipping - compiler/librustdoc docs disabled"));
+            builder.info("\tskipping - compiler/librustdoc docs disabled");
             return;
         }
 
@@ -788,7 +788,7 @@ impl Step for Rustdoc {
         };
 
         if !builder.config.compiler_docs {
-            builder.info(&format!("\tskipping - compiler/librustdoc docs disabled"));
+            builder.info("\tskipping - compiler/librustdoc docs disabled");
             return;
         }
 
@@ -814,6 +814,7 @@ impl Step for Rustdoc {
             target,
             "doc",
             "src/tools/rustdoc",
+            SourceType::InTree,
         );
 
         cargo.env("RUSTDOCFLAGS", "--document-private-items");

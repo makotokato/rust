@@ -123,7 +123,7 @@ impl<'a> NameResolution<'a> {
     }
 }
 
-impl<'a> Resolver<'a> {
+impl<'a, 'crateloader> Resolver<'a, 'crateloader> {
     fn resolution(&self, module: Module<'a>, ident: Ident, ns: Namespace)
                   -> &'a RefCell<NameResolution<'a>> {
         *module.resolutions.borrow_mut().entry((ident.modern(), ns))
@@ -211,7 +211,9 @@ impl<'a> Resolver<'a> {
         // if it cannot be shadowed by some new item/import expanded from a macro.
         // This happens either if there are no unexpanded macros, or expanded names cannot
         // shadow globs (that happens in macro namespace or with restricted shadowing).
-        let unexpanded_macros = !module.unresolved_invocations.borrow().is_empty();
+        let unexpanded_macros = !module.unresolved_invocations.borrow().is_empty() ||
+                                (ns == MacroNS && ptr::eq(module, self.graph_root) &&
+                                 !self.unresolved_invocations_macro_export.is_empty());
         if let Some(binding) = resolution.binding {
             if !unexpanded_macros || ns == MacroNS || restricted_shadowing {
                 return check_usable(self, binding);
@@ -363,6 +365,18 @@ impl<'a> Resolver<'a> {
                         resolution.binding = Some(binding);
                         resolution.shadowed_glob = Some(old_binding);
                     }
+                } else if let (&NameBindingKind::Def(_, true), &NameBindingKind::Def(_, true)) =
+                        (&old_binding.kind, &binding.kind) {
+
+                    this.session.buffer_lint_with_diagnostic(
+                        DUPLICATE_MACRO_EXPORTS,
+                        CRATE_NODE_ID,
+                        binding.span,
+                        &format!("a macro named `{}` has already been exported", ident),
+                        BuiltinLintDiagnostics::DuplicatedMacroExports(
+                            ident, old_binding.span, binding.span));
+
+                    resolution.binding = Some(binding);
                 } else {
                     return Err(old_binding);
                 }
@@ -388,7 +402,7 @@ impl<'a> Resolver<'a> {
     // If the resolution becomes a success, define it in the module's glob importers.
     fn update_resolution<T, F>(&mut self, module: Module<'a>, ident: Ident, ns: Namespace, f: F)
                                -> T
-        where F: FnOnce(&mut Resolver<'a>, &mut NameResolution<'a>) -> T
+        where F: FnOnce(&mut Resolver<'a, 'crateloader>, &mut NameResolution<'a>) -> T
     {
         // Ensure that `resolution` isn't borrowed when defining in the module's glob importers,
         // during which the resolution might end up getting re-defined via a glob cycle.
@@ -439,30 +453,30 @@ impl<'a> Resolver<'a> {
     }
 }
 
-pub struct ImportResolver<'a, 'b: 'a> {
-    pub resolver: &'a mut Resolver<'b>,
+pub struct ImportResolver<'a, 'b: 'a, 'c: 'a + 'b> {
+    pub resolver: &'a mut Resolver<'b, 'c>,
 }
 
-impl<'a, 'b: 'a> ::std::ops::Deref for ImportResolver<'a, 'b> {
-    type Target = Resolver<'b>;
-    fn deref(&self) -> &Resolver<'b> {
+impl<'a, 'b: 'a, 'c: 'a + 'b> ::std::ops::Deref for ImportResolver<'a, 'b, 'c> {
+    type Target = Resolver<'b, 'c>;
+    fn deref(&self) -> &Resolver<'b, 'c> {
         self.resolver
     }
 }
 
-impl<'a, 'b: 'a> ::std::ops::DerefMut for ImportResolver<'a, 'b> {
-    fn deref_mut(&mut self) -> &mut Resolver<'b> {
+impl<'a, 'b: 'a, 'c: 'a + 'b> ::std::ops::DerefMut for ImportResolver<'a, 'b, 'c> {
+    fn deref_mut(&mut self) -> &mut Resolver<'b, 'c> {
         self.resolver
     }
 }
 
-impl<'a, 'b: 'a> ty::DefIdTree for &'a ImportResolver<'a, 'b> {
+impl<'a, 'b: 'a, 'c: 'a + 'b> ty::DefIdTree for &'a ImportResolver<'a, 'b, 'c> {
     fn parent(self, id: DefId) -> Option<DefId> {
         self.resolver.parent(id)
     }
 }
 
-impl<'a, 'b:'a> ImportResolver<'a, 'b> {
+impl<'a, 'b:'a, 'c: 'b> ImportResolver<'a, 'b, 'c> {
     // Import resolution
     //
     // This is a fixed-point algorithm. We resolve imports until our efforts
@@ -677,6 +691,8 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
                             expansion: directive.expansion,
                         });
                         let _ = self.try_define(directive.parent, target, TypeNS, binding);
+                        let import = self.import_map.entry(directive.id).or_default();
+                        import[TypeNS] = Some(PathResolution::new(binding.def()));
                         return None;
                     }
                 }
@@ -766,7 +782,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
                                     match binding.kind {
                                         // Never suggest the name that has binding error
                                         // i.e. the name that cannot be previously resolved
-                                        NameBindingKind::Def(Def::Err) => return None,
+                                        NameBindingKind::Def(Def::Err, _) => return None,
                                         _ => Some(&i.name),
                                     }
                                 },
@@ -865,7 +881,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
         // this may resolve to either a value or a type, but for documentation
         // purposes it's good enough to just favor one over the other.
         self.per_ns(|this, ns| if let Some(binding) = result[ns].get().ok() {
-            let mut import = this.import_map.entry(directive.id).or_default();
+            let import = this.import_map.entry(directive.id).or_default();
             import[ns] = Some(PathResolution::new(binding.def()));
         });
 

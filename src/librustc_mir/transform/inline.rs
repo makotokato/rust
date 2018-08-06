@@ -14,7 +14,7 @@ use rustc::hir;
 use rustc::hir::CodegenFnAttrFlags;
 use rustc::hir::def_id::DefId;
 
-use rustc_data_structures::bitvec::BitVector;
+use rustc_data_structures::bitvec::BitArray;
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
 
 use rustc::mir::*;
@@ -271,7 +271,7 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
         // Traverse the MIR manually so we can account for the effects of
         // inlining on the CFG.
         let mut work_list = vec![START_BLOCK];
-        let mut visited = BitVector::new(callee_mir.basic_blocks().len());
+        let mut visited = BitArray::new(callee_mir.basic_blocks().len());
         while let Some(bb) = work_list.pop() {
             if !visited.insert(bb.index()) { continue; }
             let blk = &callee_mir.basic_blocks()[bb];
@@ -406,10 +406,9 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
                     local_map.push(idx);
                 }
 
-                for p in callee_mir.promoted.iter().cloned() {
-                    let idx = caller_mir.promoted.push(p);
-                    promoted_map.push(idx);
-                }
+                promoted_map.extend(
+                    callee_mir.promoted.iter().cloned().map(|p| caller_mir.promoted.push(p))
+                );
 
                 // If the call is something like `a[*i] = f(i)`, where
                 // `i : &mut usize`, then just duplicating the `a[*i]`

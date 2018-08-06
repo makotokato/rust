@@ -24,11 +24,12 @@ use rustc::session::{Session, CrateDisambiguator};
 use rustc::session::config::{Sanitizer, self};
 use rustc_target::spec::{PanicStrategy, TargetTriple};
 use rustc::session::search_paths::PathKind;
-use rustc::middle;
-use rustc::middle::cstore::{validate_crate_name, ExternCrate, ExternCrateSource};
+use rustc::middle::cstore::{ExternCrate, ExternCrateSource};
 use rustc::util::common::record_time;
 use rustc::util::nodemap::FxHashSet;
 use rustc::hir::map::Definitions;
+
+use rustc_metadata_utils::validate_crate_name;
 
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -626,7 +627,7 @@ impl<'a> CrateLoader<'a> {
         // If we're only compiling an rlib, then there's no need to select a
         // panic runtime, so we just skip this section entirely.
         let any_non_rlib = self.sess.crate_types.borrow().iter().any(|ct| {
-            *ct != config::CrateTypeRlib
+            *ct != config::CrateType::Rlib
         });
         if !any_non_rlib {
             info!("panic runtime injection skipped, only generating rlib");
@@ -737,13 +738,13 @@ impl<'a> CrateLoader<'a> {
                 if !self.sess.crate_types.borrow().iter().all(|ct| {
                     match *ct {
                         // Link the runtime
-                        config::CrateTypeStaticlib |
-                        config::CrateTypeExecutable => true,
+                        config::CrateType::Staticlib |
+                        config::CrateType::Executable => true,
                         // This crate will be compiled with the required
                         // instrumentation pass
-                        config::CrateTypeRlib |
-                        config::CrateTypeDylib |
-                        config::CrateTypeCdylib =>
+                        config::CrateType::Rlib |
+                        config::CrateType::Dylib |
+                        config::CrateType::Cdylib =>
                             false,
                         _ => {
                             self.sess.err(&format!("Only executables, staticlibs, \
@@ -759,10 +760,10 @@ impl<'a> CrateLoader<'a> {
                 if !self.sess.crate_types.borrow().iter().all(|ct| {
                     match *ct {
                         // Link the runtime
-                        config::CrateTypeExecutable => true,
+                        config::CrateType::Executable => true,
                         // This crate will be compiled with the required
                         // instrumentation pass
-                        config::CrateTypeRlib => false,
+                        config::CrateType::Rlib => false,
                         _ => {
                             self.sess.err(&format!("Only executables and rlibs can be \
                                                     compiled with `-Z sanitizer`"));
@@ -802,7 +803,7 @@ impl<'a> CrateLoader<'a> {
                                            name));
                 }
             } else {
-                self.sess.err(&format!("Must link std to be compiled with `-Z sanitizer`"));
+                self.sess.err("Must link std to be compiled with `-Z sanitizer`");
             }
         }
     }
@@ -852,12 +853,12 @@ impl<'a> CrateLoader<'a> {
         let mut need_exe_alloc = false;
         for ct in self.sess.crate_types.borrow().iter() {
             match *ct {
-                config::CrateTypeExecutable => need_exe_alloc = true,
-                config::CrateTypeDylib |
-                config::CrateTypeProcMacro |
-                config::CrateTypeCdylib |
-                config::CrateTypeStaticlib => need_lib_alloc = true,
-                config::CrateTypeRlib => {}
+                config::CrateType::Executable => need_exe_alloc = true,
+                config::CrateType::Dylib |
+                config::CrateType::ProcMacro |
+                config::CrateType::Cdylib |
+                config::CrateType::Staticlib => need_lib_alloc = true,
+                config::CrateType::Rlib => {}
             }
         }
         if !need_lib_alloc && !need_exe_alloc {
@@ -1056,8 +1057,8 @@ impl<'a> CrateLoader<'a> {
     }
 }
 
-impl<'a> middle::cstore::CrateLoader for CrateLoader<'a> {
-    fn postprocess(&mut self, krate: &ast::Crate) {
+impl<'a> CrateLoader<'a> {
+    pub fn postprocess(&mut self, krate: &ast::Crate) {
         // inject the sanitizer runtime before the allocator runtime because all
         // sanitizers force the use of the `alloc_system` allocator
         self.inject_sanitizer_runtime();
@@ -1070,7 +1071,9 @@ impl<'a> middle::cstore::CrateLoader for CrateLoader<'a> {
         }
     }
 
-    fn process_extern_crate(&mut self, item: &ast::Item, definitions: &Definitions) -> CrateNum {
+    pub fn process_extern_crate(
+        &mut self, item: &ast::Item, definitions: &Definitions,
+    ) -> CrateNum {
         match item.node {
             ast::ItemKind::ExternCrate(orig_name) => {
                 debug!("resolving extern crate stmt. ident: {} orig_name: {:?}",
@@ -1113,7 +1116,7 @@ impl<'a> middle::cstore::CrateLoader for CrateLoader<'a> {
         }
     }
 
-    fn process_path_extern(
+    pub fn process_path_extern(
         &mut self,
         name: Symbol,
         span: Span,
@@ -1137,7 +1140,7 @@ impl<'a> middle::cstore::CrateLoader for CrateLoader<'a> {
         cnum
     }
 
-    fn process_use_extern(
+    pub fn process_use_extern(
         &mut self,
         name: Symbol,
         span: Span,

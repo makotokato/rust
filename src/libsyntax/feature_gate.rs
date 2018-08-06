@@ -80,6 +80,11 @@ macro_rules! declare_features {
             {
                 $(f(stringify!($feature), self.$feature);)+
             }
+
+            pub fn use_extern_macros(&self) -> bool {
+                // The `decl_macro` and `tool_attributes` features imply `use_extern_macros`.
+                self.use_extern_macros || self.decl_macro || self.tool_attributes
+            }
         }
     };
 
@@ -396,6 +401,9 @@ declare_features! (
     // Infer outlives requirements; RFC 2093
     (active, infer_outlives_requirements, "1.26.0", Some(44493), None),
 
+    // Infer static outlives requirements; RFC 2093
+    (active, infer_static_outlives_requirements, "1.26.0", Some(44493), None),
+
     // Multiple patterns with `|` in `if let` and `while let`
     (active, if_while_or_patterns, "1.26.0", Some(48215), None),
 
@@ -409,7 +417,7 @@ declare_features! (
     (active, underscore_imports, "1.26.0", Some(48216), None),
 
     // Allows keywords to be escaped for use as identifiers
-    (active, raw_identifiers, "1.26.0", Some(48589), None),
+    (active, raw_identifiers, "1.26.0", Some(48589), Some(Edition::Edition2018)),
 
     // Allows macro invocations in `extern {}` blocks
     (active, macros_in_extern, "1.27.0", Some(49476), None),
@@ -684,6 +692,10 @@ macro_rules! cfg_fn {
 
 pub fn deprecated_attributes() -> Vec<&'static (&'static str, AttributeType, AttributeGate)> {
     BUILTIN_ATTRIBUTES.iter().filter(|a| a.2.is_deprecated()).collect()
+}
+
+pub fn is_builtin_attr_name(name: ast::Name) -> bool {
+    BUILTIN_ATTRIBUTES.iter().any(|&(builtin_name, _, _)| name == builtin_name)
 }
 
 pub fn is_builtin_attr(attr: &ast::Attribute) -> bool {
@@ -1057,6 +1069,12 @@ pub const BUILTIN_ATTRIBUTES: &'static [(&'static str, AttributeType, AttributeG
                                    "infer outlives requirements is an experimental feature",
                                    cfg_fn!(infer_outlives_requirements))),
 
+    // RFC #2093
+    ("infer_static_outlives_requirements", Normal, Gated(Stability::Unstable,
+                                   "infer_static_outlives_requirements",
+                                   "infer 'static lifetime requirements",
+                                   cfg_fn!(infer_static_outlives_requirements))),
+
     // RFC 2070
     ("panic_implementation", Normal, Gated(Stability::Unstable,
                            "panic_implementation",
@@ -1189,28 +1207,9 @@ impl<'a> Context<'a> {
             // before the plugin attributes are registered
             // so we skip this then
             if !is_macro {
-                if attr.is_scoped() {
-                    gate_feature!(self, tool_attributes, attr.span,
-                                  &format!("scoped attribute `{}` is experimental", attr.path));
-                    if attr::is_known_tool(attr) {
-                        attr::mark_used(attr);
-                    } else {
-                        span_err!(
-                            self.parse_sess.span_diagnostic,
-                            attr.span,
-                            E0694,
-                            "an unknown tool name found in scoped attribute: `{}`.",
-                            attr.path
-                        );
-                    }
-                } else {
-                    gate_feature!(self, custom_attribute, attr.span,
-                                  &format!("The attribute `{}` is currently \
-                                            unknown to the compiler and \
-                                            may have meaning \
-                                            added to it in the future",
-                                           attr.path));
-                }
+                let msg = format!("The attribute `{}` is currently unknown to the compiler and \
+                                   may have meaning added to it in the future", attr.path);
+                gate_feature!(self, custom_attribute, attr.span, &msg);
             }
         }
     }
@@ -1520,7 +1519,7 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
             }
         }
 
-        if self.context.features.use_extern_macros && attr::is_known(attr) {
+        if self.context.features.use_extern_macros() && attr::is_known(attr) {
             return
         }
 
@@ -1995,7 +1994,7 @@ impl FeatureChecker {
     // the branching can be eliminated by modifying `set!()` to set these spans
     // only for the features that need to be checked for mutual exclusion.
     fn collect(&mut self, features: &Features, span: Span) {
-        if features.use_extern_macros {
+        if features.use_extern_macros() {
             // If self.use_extern_macros is None, set to Some(span)
             self.use_extern_macros = self.use_extern_macros.or(Some(span));
         }

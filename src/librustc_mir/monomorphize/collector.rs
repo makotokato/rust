@@ -193,7 +193,7 @@ use rustc::hir::itemlikevisit::ItemLikeVisitor;
 
 use rustc::hir::map as hir_map;
 use rustc::hir::def_id::DefId;
-use rustc::mir::interpret::{AllocId, ConstValue};
+use rustc::mir::interpret::{AllocId, ConstValue, ScalarMaybeUndef};
 use rustc::middle::lang_items::{ExchangeMallocFnLangItem, StartFnLangItem};
 use rustc::ty::subst::Substs;
 use rustc::ty::{self, TypeFoldable, Ty, TyCtxt, GenericParamDefKind};
@@ -240,7 +240,7 @@ impl<'tcx> InliningMap<'tcx> {
         InliningMap {
             index: FxHashMap(),
             targets: Vec::new(),
-            inlines: BitVector::new(1024),
+            inlines: BitVector::with_capacity(1024),
         }
     }
 
@@ -770,7 +770,7 @@ fn should_monomorphize_locally<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, instance: 
         // If we are not in share generics mode, we don't link to upstream
         // monomorphizations but always instantiate our own internal versions
         // instead.
-        if !tcx.share_generics() {
+        if !tcx.sess.opts.share_generics() {
             return false
         }
 
@@ -1047,7 +1047,7 @@ impl<'b, 'a, 'v> RootCollector<'b, 'a, 'v> {
     /// the return type of `main`. This is not needed when
     /// the user writes their own `start` manually.
     fn push_extra_entry_roots(&mut self) {
-        if self.tcx.sess.entry_fn.get().map(|e| e.2) != Some(config::EntryMain) {
+        if self.tcx.sess.entry_fn.get().map(|e| e.2) != Some(config::EntryFnType::Main) {
             return
         }
 
@@ -1264,11 +1264,11 @@ fn collect_const<'a, 'tcx>(
     };
     match val {
         ConstValue::Unevaluated(..) => bug!("const eval yielded unevaluated const"),
-        ConstValue::ScalarPair(Scalar::Ptr(a), Scalar::Ptr(b)) => {
+        ConstValue::ScalarPair(Scalar::Ptr(a), ScalarMaybeUndef::Scalar(Scalar::Ptr(b))) => {
             collect_miri(tcx, a.alloc_id, output);
             collect_miri(tcx, b.alloc_id, output);
         }
-        ConstValue::ScalarPair(_, Scalar::Ptr(ptr)) |
+        ConstValue::ScalarPair(_, ScalarMaybeUndef::Scalar(Scalar::Ptr(ptr))) |
         ConstValue::ScalarPair(Scalar::Ptr(ptr), _) |
         ConstValue::Scalar(Scalar::Ptr(ptr)) =>
             collect_miri(tcx, ptr.alloc_id, output),

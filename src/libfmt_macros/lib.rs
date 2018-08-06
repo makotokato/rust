@@ -14,8 +14,6 @@
 //! Parsing does not happen at runtime: structures of `std::fmt::rt` are
 //! generated instead.
 
-#![deny(bare_trait_objects)]
-
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/",
@@ -170,7 +168,7 @@ impl<'a> Iterator for Parser<'a> {
                     if self.consume('{') {
                         Some(String(self.string(pos + 1)))
                     } else {
-                        let mut arg = self.argument();
+                        let arg = self.argument();
                         if let Some(arg_pos) = self.must_consume('}').map(|end| {
                             (pos + raw + 1, end + raw + 2)
                         }) {

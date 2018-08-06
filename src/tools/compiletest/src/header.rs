@@ -14,7 +14,7 @@ use std::io::prelude::*;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use common::{self, Config, Mode};
+use common::{self, CompareMode, Config, Mode};
 use util;
 
 use extract_gdb_version;
@@ -231,6 +231,7 @@ pub struct TestProps {
     pub normalize_stderr: Vec<(String, String)>,
     pub failure_status: i32,
     pub run_rustfix: bool,
+    pub rustfix_only_machine_applicable: bool,
 }
 
 impl TestProps {
@@ -263,6 +264,7 @@ impl TestProps {
             normalize_stderr: vec![],
             failure_status: -1,
             run_rustfix: false,
+            rustfix_only_machine_applicable: false,
         }
     }
 
@@ -397,6 +399,11 @@ impl TestProps {
             if !self.run_rustfix {
                 self.run_rustfix = config.parse_run_rustfix(ln);
             }
+
+            if !self.rustfix_only_machine_applicable {
+                self.rustfix_only_machine_applicable =
+                    config.parse_rustfix_only_machine_applicable(ln);
+            }
         });
 
         if self.failure_status == -1 {
@@ -416,7 +423,7 @@ impl TestProps {
     }
 }
 
-fn iter_header(testfile: &Path, cfg: Option<&str>, it: &mut FnMut(&str)) {
+fn iter_header(testfile: &Path, cfg: Option<&str>, it: &mut dyn FnMut(&str)) {
     if testfile.is_dir() {
         return;
     }
@@ -608,7 +615,12 @@ impl Config {
                     common::DebugInfoLldb => name == "lldb",
                     common::Pretty => name == "pretty",
                     _ => false,
-                } || (self.target != self.host && name == "cross-compile")
+                } || (self.target != self.host && name == "cross-compile") ||
+                match self.compare_mode {
+                    Some(CompareMode::Nll) => name == "compare-mode-nll",
+                    Some(CompareMode::Polonius) => name == "compare-mode-polonius",
+                    None => false,
+                }
         } else {
             false
         }
@@ -656,6 +668,10 @@ impl Config {
 
     fn parse_run_rustfix(&self, line: &str) -> bool {
         self.parse_name_directive(line, "run-rustfix")
+    }
+
+    fn parse_rustfix_only_machine_applicable(&self, line: &str) -> bool {
+        self.parse_name_directive(line, "rustfix-only-machine-applicable")
     }
 
     fn parse_edition(&self, line: &str) -> Option<String> {

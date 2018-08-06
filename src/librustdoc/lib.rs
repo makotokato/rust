@@ -25,6 +25,8 @@
 #![feature(vec_remove_item)]
 #![feature(entry_and_modify)]
 #![feature(ptr_offset_from)]
+#![feature(crate_visibility_modifier)]
+#![feature(const_fn)]
 
 #![recursion_limit="256"]
 
@@ -72,30 +74,28 @@ use rustc_target::spec::TargetTriple;
 use rustc::session::config::get_cmd_lint_options;
 
 #[macro_use]
-pub mod externalfiles;
+mod externalfiles;
 
-pub mod clean;
-pub mod core;
-pub mod doctree;
-pub mod fold;
+mod clean;
+mod core;
+mod doctree;
+mod fold;
 pub mod html {
-    pub mod highlight;
-    pub mod escape;
-    pub mod item_type;
-    pub mod format;
-    pub mod layout;
+    crate mod highlight;
+    crate mod escape;
+    crate mod item_type;
+    crate mod format;
+    crate mod layout;
     pub mod markdown;
-    pub mod render;
-    pub mod toc;
+    crate mod render;
+    crate mod toc;
 }
-pub mod markdown;
-pub mod passes;
-pub mod visit_ast;
-pub mod visit_lib;
-pub mod test;
-pub mod theme;
-
-use clean::AttributesExt;
+mod markdown;
+mod passes;
+mod visit_ast;
+mod visit_lib;
+mod test;
+mod theme;
 
 struct Output {
     krate: clean::Crate,
@@ -140,7 +140,7 @@ fn unstable<F>(name: &'static str, f: F) -> RustcOptGroup
     RustcOptGroup::unstable(name, f)
 }
 
-pub fn opts() -> Vec<RustcOptGroup> {
+fn opts() -> Vec<RustcOptGroup> {
     vec![
         stable("h", |o| o.optflag("h", "help", "show this help message")),
         stable("V", |o| o.optflag("V", "version", "print rustdoc's version")),
@@ -289,7 +289,7 @@ pub fn opts() -> Vec<RustcOptGroup> {
                      "edition to use when compiling rust code (default: 2015)",
                      "EDITION")
         }),
-        unstable("color", |o| {
+        stable("color", |o| {
             o.optopt("",
                      "color",
                      "Configure coloring of output:
@@ -298,7 +298,7 @@ pub fn opts() -> Vec<RustcOptGroup> {
                                           never  = never colorize output",
                      "auto|always|never")
         }),
-        unstable("error-format", |o| {
+        stable("error-format", |o| {
             o.optopt("",
                      "error-format",
                      "How errors and other messages are produced",
@@ -334,7 +334,7 @@ pub fn opts() -> Vec<RustcOptGroup> {
     ]
 }
 
-pub fn usage(argv0: &str) {
+fn usage(argv0: &str) {
     let mut options = getopts::Options::new();
     for option in opts() {
         (option.apply)(&mut options);
@@ -342,7 +342,7 @@ pub fn usage(argv0: &str) {
     println!("{}", options.usage(&format!("{} [options] <input>", argv0)));
 }
 
-pub fn main_args(args: &[String]) -> isize {
+fn main_args(args: &[String]) -> isize {
     let mut options = getopts::Options::new();
     for option in opts() {
         (option.apply)(&mut options);
@@ -366,11 +366,15 @@ pub fn main_args(args: &[String]) -> isize {
 
     if matches.opt_strs("passes") == ["list"] {
         println!("Available passes for running rustdoc:");
-        for &(name, _, description) in passes::PASSES {
-            println!("{:>20} - {}", name, description);
+        for pass in passes::PASSES {
+            println!("{:>20} - {}", pass.name(), pass.description());
         }
         println!("\nDefault passes for rustdoc:");
         for &name in passes::DEFAULT_PASSES {
+            println!("{:>20}", name);
+        }
+        println!("\nPasses run with `--document-private-items`:");
+        for &name in passes::DEFAULT_PRIVATE_PASSES {
             println!("{:>20}", name);
         }
         return 0;
@@ -495,12 +499,14 @@ pub fn main_args(args: &[String]) -> isize {
         }
     }
 
+    let mut id_map = html::markdown::IdMap::new();
+    id_map.populate(html::render::initial_ids());
     let external_html = match ExternalHtml::load(
             &matches.opt_strs("html-in-header"),
             &matches.opt_strs("html-before-content"),
             &matches.opt_strs("html-after-content"),
             &matches.opt_strs("markdown-before-content"),
-            &matches.opt_strs("markdown-after-content"), &diag) {
+            &matches.opt_strs("markdown-after-content"), &diag, &mut id_map) {
         Some(eh) => eh,
         None => return 3,
     };
@@ -557,7 +563,7 @@ pub fn main_args(args: &[String]) -> isize {
                                   renderinfo,
                                   sort_modules_alphabetically,
                                   themes,
-                                  enable_minification)
+                                  enable_minification, id_map)
                     .expect("failed to generate documentation");
                 0
             }
@@ -623,20 +629,16 @@ fn rust_input<R, F>(cratefile: PathBuf,
 where R: 'static + Send,
       F: 'static + Send + FnOnce(Output) -> R
 {
-    let mut default_passes = !matches.opt_present("no-defaults");
-    let mut passes = matches.opt_strs("passes");
-    let mut plugins = matches.opt_strs("plugins");
+    let default_passes = if matches.opt_present("no-defaults") {
+        passes::DefaultPassOption::None
+    } else if matches.opt_present("document-private-items") {
+        passes::DefaultPassOption::Private
+    } else {
+        passes::DefaultPassOption::Default
+    };
 
-    // We hardcode in the passes here, as this is a new flag and we
-    // are generally deprecating passes.
-    if matches.opt_present("document-private-items") {
-        default_passes = false;
-
-        passes = vec![
-            String::from("collapse-docs"),
-            String::from("unindent-comments"),
-        ];
-    }
+    let manual_passes = matches.opt_strs("passes");
+    let plugins = matches.opt_strs("plugins");
 
     // First, parse the crate and extract all relevant information.
     let mut paths = SearchPaths::new();
@@ -670,11 +672,11 @@ where R: 'static + Send,
     let result = rustc_driver::monitor(move || syntax::with_globals(move || {
         use rustc::session::config::Input;
 
-        let (mut krate, renderinfo) =
+        let (mut krate, renderinfo, passes) =
             core::run_core(paths, cfgs, externs, Input::File(cratefile), triple, maybe_sysroot,
                            display_warnings, crate_name.clone(),
                            force_unstable_if_unmarked, edition, cg, error_format,
-                           lint_opts, lint_cap, describe_lints);
+                           lint_opts, lint_cap, describe_lints, manual_passes, default_passes);
 
         info!("finished with rustc");
 
@@ -683,63 +685,6 @@ where R: 'static + Send,
         }
 
         krate.version = crate_version;
-
-        let diag = core::new_handler(error_format, None);
-
-        fn report_deprecated_attr(name: &str, diag: &errors::Handler) {
-            let mut msg = diag.struct_warn(&format!("the `#![doc({})]` attribute is \
-                                                     considered deprecated", name));
-            msg.warn("please see https://github.com/rust-lang/rust/issues/44136");
-
-            if name == "no_default_passes" {
-                msg.help("you may want to use `#![doc(document_private_items)]`");
-            }
-
-            msg.emit();
-        }
-
-        // Process all of the crate attributes, extracting plugin metadata along
-        // with the passes which we are supposed to run.
-        for attr in krate.module.as_ref().unwrap().attrs.lists("doc") {
-            let name = attr.name().map(|s| s.as_str());
-            let name = name.as_ref().map(|s| &s[..]);
-            if attr.is_word() {
-                if name == Some("no_default_passes") {
-                    report_deprecated_attr("no_default_passes", &diag);
-                    default_passes = false;
-                }
-            } else if let Some(value) = attr.value_str() {
-                let sink = match name {
-                    Some("passes") => {
-                        report_deprecated_attr("passes = \"...\"", &diag);
-                        &mut passes
-                    },
-                    Some("plugins") => {
-                        report_deprecated_attr("plugins = \"...\"", &diag);
-                        &mut plugins
-                    },
-                    _ => continue,
-                };
-                for p in value.as_str().split_whitespace() {
-                    sink.push(p.to_string());
-                }
-            }
-
-            if attr.is_word() && name == Some("document_private_items") {
-                default_passes = false;
-
-                passes = vec![
-                    String::from("collapse-docs"),
-                    String::from("unindent-comments"),
-                ];
-            }
-        }
-
-        if default_passes {
-            for name in passes::DEFAULT_PASSES.iter().rev() {
-                passes.insert(0, name.to_string());
-            }
-        }
 
         if !plugins.is_empty() {
             eprintln!("WARNING: --plugins no longer functions; see CVE-2018-1000622");
@@ -753,8 +698,13 @@ where R: 'static + Send,
 
         for pass in &passes {
             // determine if we know about this pass
-            let pass = match passes::PASSES.iter().find(|(p, ..)| p == pass) {
-                Some(pass) => pass.1,
+            let pass = match passes::find_pass(pass) {
+                Some(pass) => if let Some(pass) = pass.late_fn() {
+                    pass
+                } else {
+                    // not a late pass, but still valid so don't report the error
+                    continue
+                }
                 None => {
                     error!("unknown pass {}, skipping", *pass);
 

@@ -178,6 +178,10 @@ impl Once {
     /// happens-before relation between the closure and code executing after the
     /// return).
     ///
+    /// If the given closure recusively invokes `call_once` on the same `Once`
+    /// instance the exact behavior is not specified, allowed outcomes are
+    /// a panic or a deadlock.
+    ///
     /// # Examples
     ///
     /// ```
@@ -309,7 +313,7 @@ impl Once {
     #[cold]
     fn call_inner(&self,
                   ignore_poisoning: bool,
-                  init: &mut FnMut(bool)) {
+                  init: &mut dyn FnMut(bool)) {
         let mut state = self.state.load(Ordering::SeqCst);
 
         'outer: loop {

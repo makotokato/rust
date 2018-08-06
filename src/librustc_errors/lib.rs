@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![deny(bare_trait_objects)]
-
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
@@ -610,9 +608,8 @@ impl Handler {
         if can_show_explain && are_there_diagnostics {
             let mut error_codes =
                 self.emitted_diagnostic_codes.borrow()
-                                             .clone()
-                                             .into_iter()
-                                             .filter_map(|x| match x {
+                                             .iter()
+                                             .filter_map(|x| match *x {
                                                  DiagnosticId::Error(ref s) => Some(s.clone()),
                                                  _ => None,
                                              })

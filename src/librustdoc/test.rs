@@ -42,7 +42,7 @@ use errors;
 use errors::emitter::ColorConfig;
 
 use clean::Attributes;
-use html::markdown;
+use html::markdown::{self, ErrorCodes, LangString};
 
 #[derive(Clone, Default)]
 pub struct TestOptions {
@@ -73,7 +73,7 @@ pub fn run(input_path: &Path,
         maybe_sysroot: maybe_sysroot.clone().or_else(
             || Some(env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf())),
         search_paths: libs.clone(),
-        crate_types: vec![config::CrateTypeDylib],
+        crate_types: vec![config::CrateType::Dylib],
         cg: cg.clone(),
         externs: externs.clone(),
         unstable_features: UnstableFeatures::from_environment(),
@@ -83,7 +83,7 @@ pub fn run(input_path: &Path,
             ..config::basic_debugging_options()
         },
         edition,
-        ..config::basic_options().clone()
+        ..config::Options::default()
     };
     driver::spawn_thread_pool(sessopts, |sessopts| {
         let codemap = Lrc::new(CodeMap::new(sessopts.file_path_mapping()));
@@ -145,7 +145,8 @@ pub fn run(input_path: &Path,
             let mut hir_collector = HirCollector {
                 sess: &sess,
                 collector: &mut collector,
-                map: &map
+                map: &map,
+                codes: ErrorCodes::from(sess.opts.unstable_features.is_nightly_build()),
             };
             hir_collector.visit_testable("".to_string(), &krate.attrs, |this| {
                 intravisit::walk_crate(this, krate);
@@ -215,7 +216,7 @@ fn run_test(test: &str, cratename: &str, filename: &FileName, line: usize,
         maybe_sysroot: maybe_sysroot.or_else(
             || Some(env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf())),
         search_paths: libs,
-        crate_types: vec![config::CrateTypeExecutable],
+        crate_types: vec![config::CrateType::Executable],
         output_types: outputs,
         externs,
         cg: config::CodegenOptions {
@@ -229,7 +230,7 @@ fn run_test(test: &str, cratename: &str, filename: &FileName, line: usize,
             ..config::basic_debugging_options()
         },
         edition,
-        ..config::basic_options().clone()
+        ..config::Options::default()
     };
 
     // Shuffle around a few input and output handles here. We're going to pass
@@ -249,7 +250,7 @@ fn run_test(test: &str, cratename: &str, filename: &FileName, line: usize,
         }
         fn flush(&mut self) -> io::Result<()> { Ok(()) }
     }
-    struct Bomb(Arc<Mutex<Vec<u8>>>, Box<Write+Send>);
+    struct Bomb(Arc<Mutex<Vec<u8>>>, Box<dyn Write+Send>);
     impl Drop for Bomb {
         fn drop(&mut self) {
             let _ = self.1.write_all(&self.0.lock().unwrap());
@@ -533,10 +534,8 @@ impl Collector {
         format!("{} - {} (line {})", filename, self.names.join("::"), line)
     }
 
-    pub fn add_test(&mut self, test: String,
-                    should_panic: bool, no_run: bool, should_ignore: bool,
-                    as_test_harness: bool, compile_fail: bool, error_codes: Vec<String>,
-                    line: usize, filename: FileName, allow_fail: bool) {
+    pub fn add_test(&mut self, test: String, config: LangString, line: usize) {
+        let filename = self.get_filename();
         let name = self.generate_name(line, &filename);
         let cfgs = self.cfgs.clone();
         let libs = self.libs.clone();
@@ -551,10 +550,10 @@ impl Collector {
         self.tests.push(testing::TestDescAndFn {
             desc: testing::TestDesc {
                 name: testing::DynTestName(name.clone()),
-                ignore: should_ignore,
+                ignore: config.ignore,
                 // compiler failures are test failures
                 should_panic: testing::ShouldPanic::No,
-                allow_fail,
+                allow_fail: config.allow_fail,
             },
             testfn: testing::DynTestFn(box move || {
                 let panic = io::set_panic(None);
@@ -572,11 +571,11 @@ impl Collector {
                                  libs,
                                  cg,
                                  externs,
-                                 should_panic,
-                                 no_run,
-                                 as_test_harness,
-                                 compile_fail,
-                                 error_codes,
+                                 config.should_panic,
+                                 config.no_run,
+                                 config.test_harness,
+                                 config.compile_fail,
+                                 config.error_codes,
                                  &opts,
                                  maybe_sysroot,
                                  linker,
@@ -604,7 +603,7 @@ impl Collector {
         self.position = position;
     }
 
-    pub fn get_filename(&self) -> FileName {
+    fn get_filename(&self) -> FileName {
         if let Some(ref codemap) = self.codemap {
             let filename = codemap.span_to_filename(self.position);
             if let FileName::Real(ref filename) = filename {
@@ -664,7 +663,8 @@ impl Collector {
 struct HirCollector<'a, 'hir: 'a> {
     sess: &'a session::Session,
     collector: &'a mut Collector,
-    map: &'a hir::map::Map<'hir>
+    map: &'a hir::map::Map<'hir>,
+    codes: ErrorCodes,
 }
 
 impl<'a, 'hir> HirCollector<'a, 'hir> {
@@ -689,10 +689,12 @@ impl<'a, 'hir> HirCollector<'a, 'hir> {
         // the collapse-docs pass won't combine sugared/raw doc attributes, or included files with
         // anything else, this will combine them for us
         if let Some(doc) = attrs.collapsed_doc_value() {
-            markdown::find_testable_code(&doc,
-                                         self.collector,
-                                         attrs.span.unwrap_or(DUMMY_SP),
-                                         Some(self.sess));
+            self.collector.set_position(attrs.span.unwrap_or(DUMMY_SP));
+            let res = markdown::find_testable_code(&doc, self.collector, self.codes);
+            if let Err(err) = res {
+                self.sess.diagnostic().span_warn(attrs.span.unwrap_or(DUMMY_SP),
+                    &err.to_string());
+            }
         }
 
         nested(self);

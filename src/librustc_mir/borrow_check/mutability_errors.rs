@@ -24,6 +24,7 @@ use util::suggest_ref_mut;
 pub(super) enum AccessKind {
     MutableBorrow,
     Mutate,
+    Move,
 }
 
 impl<'a, 'gcx, 'tcx> MirBorrowckCtxt<'a, 'gcx, 'tcx> {
@@ -84,7 +85,7 @@ impl<'a, 'gcx, 'tcx> MirBorrowckCtxt<'a, 'gcx, 'tcx> {
                     reason = if self.is_upvar(access_place) {
                         ", as it is a captured variable in a `Fn` closure".to_string()
                     } else {
-                        format!(", as `Fn` closures cannot mutate their captured variables")
+                        ", as `Fn` closures cannot mutate their captured variables".to_string()
                     }
                 } else if {
                     if let Place::Local(local) = *base {
@@ -99,7 +100,7 @@ impl<'a, 'gcx, 'tcx> MirBorrowckCtxt<'a, 'gcx, 'tcx> {
                     }
                 } {
                     item_msg = format!("`{}`", access_place_desc.unwrap());
-                    reason = format!(", as it is immutable for the pattern guard");
+                    reason = ", as it is immutable for the pattern guard".to_string();
                 } else {
                     let pointer_type =
                         if base.ty(self.mir, self.tcx).to_ty(self.tcx).is_region_ptr() {
@@ -110,6 +111,7 @@ impl<'a, 'gcx, 'tcx> MirBorrowckCtxt<'a, 'gcx, 'tcx> {
                     if let Some(desc) = access_place_desc {
                         item_msg = format!("`{}`", desc);
                         reason = match error_access {
+                            AccessKind::Move |
                             AccessKind::Mutate => format!(" which is behind a {}", pointer_type),
                             AccessKind::MutableBorrow => {
                                 format!(", as it is behind a {}", pointer_type)
@@ -158,8 +160,14 @@ impl<'a, 'gcx, 'tcx> MirBorrowckCtxt<'a, 'gcx, 'tcx> {
         let act;
         let acted_on;
 
-
         let span = match error_access {
+            AccessKind::Move => {
+                err = self.tcx
+                    .cannot_move_out_of(span, &(item_msg + &reason), Origin::Mir);
+                act = "move";
+                acted_on = "moved";
+                span
+            }
             AccessKind::Mutate => {
                 err = self.tcx
                     .cannot_assign(span, &(item_msg + &reason), Origin::Mir);
@@ -171,31 +179,23 @@ impl<'a, 'gcx, 'tcx> MirBorrowckCtxt<'a, 'gcx, 'tcx> {
                 act = "borrow as mutable";
                 acted_on = "borrowed as mutable";
 
-                let closure_span = self.find_closure_span(span, location);
-                if let Some((args, var)) = closure_span {
-                    err = self.tcx.cannot_borrow_path_as_mutable_because(
-                        args,
-                        &item_msg,
-                        &reason,
-                        Origin::Mir,
-                    );
-                    err.span_label(
-                        var,
-                        format!(
-                            "mutable borrow occurs due to use of `{}` in closure",
-                            self.describe_place(access_place).unwrap(),
-                        ),
-                    );
-                    args
-                } else {
-                    err = self.tcx.cannot_borrow_path_as_mutable_because(
-                        span,
-                        &item_msg,
-                        &reason,
-                        Origin::Mir,
-                    );
-                    span
-                }
+                let borrow_spans = self.borrow_spans(span, location);
+                let borrow_span = borrow_spans.args_or_use();
+                err = self.tcx.cannot_borrow_path_as_mutable_because(
+                    borrow_span,
+                    &item_msg,
+                    &reason,
+                    Origin::Mir,
+                );
+                borrow_spans.var_span_label(
+                    &mut err,
+                    format!(
+                        "mutable borrow occurs due to use of `{}` in closure",
+                        // always Some() if the message is printed.
+                        self.describe_place(access_place).unwrap_or(String::new()),
+                    )
+                );
+                borrow_span
             }
         };
 
@@ -298,7 +298,7 @@ impl<'a, 'gcx, 'tcx> MirBorrowckCtxt<'a, 'gcx, 'tcx> {
                 let local_decl = &self.mir.local_decls[*local];
                 let suggestion = match local_decl.is_user_variable.as_ref().unwrap() {
                     ClearCrossCrate::Set(mir::BindingForm::ImplicitSelf) => {
-                        Some(suggest_ampmut_self(local_decl))
+                        Some(suggest_ampmut_self(self.tcx, local_decl))
                     }
 
                     ClearCrossCrate::Set(mir::BindingForm::Var(mir::VarBindingForm {
@@ -409,8 +409,22 @@ impl<'a, 'gcx, 'tcx> MirBorrowckCtxt<'a, 'gcx, 'tcx> {
     }
 }
 
-fn suggest_ampmut_self<'cx, 'gcx, 'tcx>(local_decl: &mir::LocalDecl<'tcx>) -> (Span, String) {
-    (local_decl.source_info.span, "&mut self".to_string())
+fn suggest_ampmut_self<'cx, 'gcx, 'tcx>(
+    tcx: TyCtxt<'cx, 'gcx, 'tcx>,
+    local_decl: &mir::LocalDecl<'tcx>,
+) -> (Span, String) {
+    let sp = local_decl.source_info.span;
+    (sp, match tcx.sess.codemap().span_to_snippet(sp) {
+        Ok(snippet) => {
+            let lt_pos = snippet.find('\'');
+            if let Some(lt_pos) = lt_pos {
+                format!("&{}mut self", &snippet[lt_pos..snippet.len() - 4])
+            } else {
+                "&mut self".to_string()
+            }
+        }
+        _ => "&mut self".to_string()
+    })
 }
 
 // When we want to suggest a user change a local variable to be a `&mut`, there
@@ -438,9 +452,15 @@ fn suggest_ampmut<'cx, 'gcx, 'tcx>(
     let locations = mir.find_assignments(local);
     if locations.len() > 0 {
         let assignment_rhs_span = mir.source_info(locations[0]).span;
-        let snippet = tcx.sess.codemap().span_to_snippet(assignment_rhs_span);
-        if let Ok(src) = snippet {
-            if src.starts_with('&') {
+        if let Ok(src) = tcx.sess.codemap().span_to_snippet(assignment_rhs_span) {
+            if let (true, Some(ws_pos)) = (
+                src.starts_with("&'"),
+                src.find(|c: char| -> bool { c.is_whitespace() }),
+            ) {
+                let lt_name = &src[1..ws_pos];
+                let ty = &src[ws_pos..];
+                return (assignment_rhs_span, format!("&{} mut {}", lt_name, ty));
+            } else if src.starts_with('&') {
                 let borrowed_expr = src[1..].to_string();
                 return (assignment_rhs_span, format!("&mut {}", borrowed_expr));
             }
@@ -457,13 +477,25 @@ fn suggest_ampmut<'cx, 'gcx, 'tcx>(
         None => local_decl.source_info.span,
     };
 
+    if let Ok(src) = tcx.sess.codemap().span_to_snippet(highlight_span) {
+        if let (true, Some(ws_pos)) = (
+            src.starts_with("&'"),
+            src.find(|c: char| -> bool { c.is_whitespace() }),
+        ) {
+            let lt_name = &src[1..ws_pos];
+            let ty = &src[ws_pos..];
+            return (highlight_span, format!("&{} mut{}", lt_name, ty));
+        }
+    }
+
     let ty_mut = local_decl.ty.builtin_deref(true).unwrap();
     assert_eq!(ty_mut.mutbl, hir::MutImmutable);
-    if local_decl.ty.is_region_ptr() {
-        (highlight_span, format!("&mut {}", ty_mut.ty))
-    } else {
-        (highlight_span, format!("*mut {}", ty_mut.ty))
-    }
+    (highlight_span,
+     if local_decl.ty.is_region_ptr() {
+         format!("&mut {}", ty_mut.ty)
+     } else {
+         format!("*mut {}", ty_mut.ty)
+     })
 }
 
 fn is_closure_or_generator(ty: ty::Ty) -> bool {

@@ -8,71 +8,38 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use rustc::traits::auto_trait as auto;
-use rustc::ty::TypeFoldable;
 use rustc::hir;
+use rustc::traits::auto_trait as auto;
+use rustc::ty::{self, TypeFoldable};
 use std::fmt::Debug;
+
+use self::def_ctor::{get_def_from_def_id, get_def_from_node_id};
 
 use super::*;
 
-pub struct AutoTraitFinder<'a, 'tcx: 'a, 'rcx: 'a> {
-    pub cx: &'a core::DocContext<'a, 'tcx, 'rcx>,
+pub struct AutoTraitFinder<'a, 'tcx: 'a, 'rcx: 'a, 'cstore: 'rcx> {
+    pub cx: &'a core::DocContext<'a, 'tcx, 'rcx, 'cstore>,
     pub f: auto::AutoTraitFinder<'a, 'tcx>,
 }
 
-impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
-    pub fn new(cx: &'a core::DocContext<'a, 'tcx, 'rcx>) -> Self {
+impl<'a, 'tcx, 'rcx, 'cstore> AutoTraitFinder<'a, 'tcx, 'rcx, 'cstore> {
+    pub fn new(cx: &'a core::DocContext<'a, 'tcx, 'rcx, 'cstore>) -> Self {
         let f = auto::AutoTraitFinder::new(&cx.tcx);
 
         AutoTraitFinder { cx, f }
     }
 
     pub fn get_with_def_id(&self, def_id: DefId) -> Vec<Item> {
-        let ty = self.cx.tcx.type_of(def_id);
-
-        let def_ctor: fn(DefId) -> Def = match ty.sty {
-            ty::TyAdt(adt, _) => match adt.adt_kind() {
-                AdtKind::Struct => Def::Struct,
-                AdtKind::Enum => Def::Enum,
-                AdtKind::Union => Def::Union,
-            }
-            ty::TyInt(_) |
-            ty::TyUint(_) |
-            ty::TyFloat(_) |
-            ty::TyStr |
-            ty::TyBool |
-            ty::TyChar => return self.get_auto_trait_impls(def_id, &move |_: DefId| {
-                match ty.sty {
-                    ty::TyInt(x) => Def::PrimTy(hir::TyInt(x)),
-                    ty::TyUint(x) => Def::PrimTy(hir::TyUint(x)),
-                    ty::TyFloat(x) => Def::PrimTy(hir::TyFloat(x)),
-                    ty::TyStr => Def::PrimTy(hir::TyStr),
-                    ty::TyBool => Def::PrimTy(hir::TyBool),
-                    ty::TyChar => Def::PrimTy(hir::TyChar),
-                    _ => unreachable!(),
-                }
-            }, None),
-            _ => {
-                debug!("Unexpected type {:?}", def_id);
-                return Vec::new()
-            }
-        };
-
-        self.get_auto_trait_impls(def_id, &def_ctor, None)
+        get_def_from_def_id(&self.cx, def_id, &|def_ctor| {
+            self.get_auto_trait_impls(def_id, &def_ctor, None)
+        })
     }
 
     pub fn get_with_node_id(&self, id: ast::NodeId, name: String) -> Vec<Item> {
-        let item = &self.cx.tcx.hir.expect_item(id).node;
-        let did = self.cx.tcx.hir.local_def_id(id);
-
-        let def_ctor = match *item {
-            hir::ItemKind::Struct(_, _) => Def::Struct,
-            hir::ItemKind::Union(_, _) => Def::Union,
-            hir::ItemKind::Enum(_, _) => Def::Enum,
-            _ => panic!("Unexpected type {:?} {:?}", item, id),
-        };
-
-        self.get_auto_trait_impls(did, &def_ctor, Some(name))
+        get_def_from_node_id(&self.cx, id, name, &|def_ctor, name| {
+            let did = self.cx.tcx.hir.local_def_id(id);
+            self.get_auto_trait_impls(did, &def_ctor, Some(name))
+        })
     }
 
     pub fn get_auto_trait_impls<F>(
@@ -196,38 +163,15 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
                 }
                 _ => unreachable!(),
             };
-
-            let path = get_path_for_type(self.cx.tcx, def_id, def_ctor);
-            let mut segments = path.segments.into_vec();
-            let last = segments.pop().unwrap();
-
             let real_name = name.map(|name| Ident::from_str(&name));
-
-            segments.push(hir::PathSegment::new(
-                real_name.unwrap_or(last.ident),
-                self.generics_to_path_params(generics.clone()),
-                false,
-            ));
-
-            let new_path = hir::Path {
-                span: path.span,
-                def: path.def,
-                segments: HirVec::from_vec(segments),
-            };
-
-            let ty = hir::Ty {
-                id: ast::DUMMY_NODE_ID,
-                node: hir::TyKind::Path(hir::QPath::Resolved(None, P(new_path))),
-                span: DUMMY_SP,
-                hir_id: hir::DUMMY_HIR_ID,
-            };
+            let ty = self.cx.get_real_ty(def_id, def_ctor, &real_name, &generics);
 
             return Some(Item {
                 source: Span::empty(),
                 name: None,
                 attrs: Default::default(),
                 visibility: None,
-                def_id: self.next_def_id(def_id.krate),
+                def_id: self.cx.next_def_id(def_id.krate),
                 stability: None,
                 deprecation: None,
                 inner: ImplItem(Impl {
@@ -239,60 +183,11 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
                     items: Vec::new(),
                     polarity,
                     synthetic: true,
+                    blanket_impl: None,
                 }),
             });
         }
         None
-    }
-
-    fn generics_to_path_params(&self, generics: ty::Generics) -> hir::GenericArgs {
-        let mut args = vec![];
-
-        for param in generics.params.iter() {
-            match param.kind {
-                ty::GenericParamDefKind::Lifetime => {
-                    let name = if param.name == "" {
-                        hir::ParamName::Plain(keywords::StaticLifetime.ident())
-                    } else {
-                        hir::ParamName::Plain(ast::Ident::from_interned_str(param.name))
-                    };
-
-                    args.push(hir::GenericArg::Lifetime(hir::Lifetime {
-                        id: ast::DUMMY_NODE_ID,
-                        span: DUMMY_SP,
-                        name: hir::LifetimeName::Param(name),
-                    }));
-                }
-                ty::GenericParamDefKind::Type {..} => {
-                    args.push(hir::GenericArg::Type(self.ty_param_to_ty(param.clone())));
-                }
-            }
-        }
-
-        hir::GenericArgs {
-            args: HirVec::from_vec(args),
-            bindings: HirVec::new(),
-            parenthesized: false,
-        }
-    }
-
-    fn ty_param_to_ty(&self, param: ty::GenericParamDef) -> hir::Ty {
-        debug!("ty_param_to_ty({:?}) {:?}", param, param.def_id);
-        hir::Ty {
-            id: ast::DUMMY_NODE_ID,
-            node: hir::TyKind::Path(hir::QPath::Resolved(
-                None,
-                P(hir::Path {
-                    span: DUMMY_SP,
-                    def: Def::TyParam(param.def_id),
-                    segments: HirVec::from_vec(vec![
-                        hir::PathSegment::from_ident(Ident::from_interned_str(param.name))
-                    ]),
-                }),
-            )),
-            span: DUMMY_SP,
-            hir_id: hir::DUMMY_HIR_ID,
-        }
     }
 
     fn find_auto_trait_generics(
@@ -411,7 +306,7 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
                     // Desired order is 'larger, smaller', so flip then
                     if self.region_name(r1) != self.region_name(r2) {
                         finished
-                            .entry(self.region_name(r2).unwrap())
+                            .entry(self.region_name(r2).expect("no region_name found"))
                             .or_insert_with(|| Vec::new())
                             .push(r1);
                     }
@@ -446,7 +341,7 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
                         (&RegionTarget::Region(r1), &RegionTarget::Region(r2)) => {
                             if self.region_name(r1) != self.region_name(r2) {
                                 finished
-                                    .entry(self.region_name(r2).unwrap())
+                                    .entry(self.region_name(r2).expect("no region name found"))
                                     .or_insert_with(|| Vec::new())
                                     .push(r1) // Larger, smaller
                             }
@@ -543,7 +438,7 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
             .flat_map(|(ty, mut bounds)| {
                 if let Some(data) = ty_to_fn.get(&ty) {
                     let (poly_trait, output) =
-                        (data.0.as_ref().unwrap().clone(), data.1.as_ref().cloned());
+                        (data.0.as_ref().expect("as_ref failed").clone(), data.1.as_ref().cloned());
                     let new_ty = match &poly_trait.trait_ {
                         &Type::ResolvedPath {
                             ref path,
@@ -552,7 +447,8 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
                             ref is_generic,
                         } => {
                             let mut new_path = path.clone();
-                            let last_segment = new_path.segments.pop().unwrap();
+                            let last_segment = new_path.segments.pop()
+                                                                .expect("segments were empty");
 
                             let (old_input, old_output) = match last_segment.args {
                                 GenericArgs::AngleBracketed { types, .. } => (types, None),
@@ -710,7 +606,7 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
                     let mut for_generics = self.extract_for_generics(tcx, orig_p.clone());
 
                     assert!(bounds.len() == 1);
-                    let mut b = bounds.pop().unwrap();
+                    let mut b = bounds.pop().expect("bounds were empty");
 
                     if b.is_sized_bound(self.cx) {
                         has_sized.insert(ty.clone());
@@ -740,7 +636,7 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
                             _ => false,
                         };
 
-                        let poly_trait = b.get_poly_trait().unwrap();
+                        let poly_trait = b.get_poly_trait().expect("Cannot get poly trait");
 
                         if is_fn {
                             ty_to_fn
@@ -793,7 +689,10 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
                                     // FIXME: Remove this scope when NLL lands
                                     {
                                         let args =
-                                            &mut new_trait_path.segments.last_mut().unwrap().args;
+                                            &mut new_trait_path.segments
+                                                .last_mut()
+                                                .expect("segments were empty")
+                                                .args;
 
                                         match args {
                                             // Convert somethiung like '<T as Iterator::Item> = u8'
@@ -956,61 +855,6 @@ impl<'a, 'tcx, 'rcx> AutoTraitFinder<'a, 'tcx, 'rcx> {
             }
             _ => false,
         }
-    }
-
-    // This is an ugly hack, but it's the simplest way to handle synthetic impls without greatly
-    // refactoring either librustdoc or librustc. In particular, allowing new DefIds to be
-    // registered after the AST is constructed would require storing the defid mapping in a
-    // RefCell, decreasing the performance for normal compilation for very little gain.
-    //
-    // Instead, we construct 'fake' def ids, which start immediately after the last DefId in
-    // DefIndexAddressSpace::Low. In the Debug impl for clean::Item, we explicitly check for fake
-    // def ids, as we'll end up with a panic if we use the DefId Debug impl for fake DefIds
-    fn next_def_id(&self, crate_num: CrateNum) -> DefId {
-        let start_def_id = {
-            let next_id = if crate_num == LOCAL_CRATE {
-                self.cx
-                    .tcx
-                    .hir
-                    .definitions()
-                    .def_path_table()
-                    .next_id(DefIndexAddressSpace::Low)
-            } else {
-                self.cx
-                    .cstore
-                    .def_path_table(crate_num)
-                    .next_id(DefIndexAddressSpace::Low)
-            };
-
-            DefId {
-                krate: crate_num,
-                index: next_id,
-            }
-        };
-
-        let mut fake_ids = self.cx.fake_def_ids.borrow_mut();
-
-        let def_id = fake_ids.entry(crate_num).or_insert(start_def_id).clone();
-        fake_ids.insert(
-            crate_num,
-            DefId {
-                krate: crate_num,
-                index: DefIndex::from_array_index(
-                    def_id.index.as_array_index() + 1,
-                    def_id.index.address_space(),
-                ),
-            },
-        );
-
-        MAX_DEF_ID.with(|m| {
-            m.borrow_mut()
-                .entry(def_id.krate.clone())
-                .or_insert(start_def_id);
-        });
-
-        self.cx.all_fake_def_ids.borrow_mut().insert(def_id);
-
-        def_id.clone()
     }
 }
 

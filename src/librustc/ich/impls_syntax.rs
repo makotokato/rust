@@ -409,7 +409,6 @@ impl_stable_hash_for!(enum ::syntax_pos::hygiene::ExpnFormat {
 
 impl_stable_hash_for!(enum ::syntax_pos::hygiene::CompilerDesugaringKind {
     Async,
-    DotFill,
     QuestionMark,
     ExistentialReturnType,
     ForLoop,
@@ -423,6 +422,7 @@ impl_stable_hash_for!(enum ::syntax_pos::FileName {
     Anon,
     MacroExpansion,
     ProcMacroSourceCode,
+    CliCrateAttr,
     CfgSpec,
     Custom(s)
 });

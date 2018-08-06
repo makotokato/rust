@@ -20,7 +20,6 @@
 #![feature(box_syntax)]
 #![feature(custom_attribute)]
 #![allow(unused_attributes)]
-#![deny(bare_trait_objects)]
 #![feature(quote)]
 #![feature(rustc_diagnostic_macros)]
 
@@ -38,6 +37,7 @@ extern crate rustc_incremental;
 extern crate syntax;
 extern crate syntax_pos;
 #[macro_use] extern crate rustc_data_structures;
+extern crate rustc_metadata_utils;
 
 use rustc::ty::TyCtxt;
 

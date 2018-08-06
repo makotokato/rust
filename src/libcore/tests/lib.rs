@@ -43,6 +43,7 @@
 #![feature(align_offset)]
 #![feature(reverse_bits)]
 #![feature(iterator_find_map)]
+#![feature(inner_deref)]
 #![feature(slice_internals)]
 #![feature(option_replace)]
 
@@ -62,6 +63,7 @@ mod fmt;
 mod hash;
 mod intrinsics;
 mod iter;
+mod manually_drop;
 mod mem;
 mod nonzero;
 mod num;

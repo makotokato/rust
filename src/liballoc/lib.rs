@@ -72,7 +72,6 @@
        test(no_crate_inject, attr(allow(unused_variables), deny(warnings))))]
 #![no_std]
 #![needs_allocator]
-#![deny(bare_trait_objects)]
 #![deny(missing_debug_implementations)]
 
 #![cfg_attr(test, allow(deprecated))] // rand
@@ -163,10 +162,7 @@ mod boxed {
 #[cfg(test)]
 mod boxed_test;
 pub mod collections;
-#[cfg(any(
-    all(stage0, target_has_atomic = "ptr"),
-    all(not(stage0), target_has_atomic = "ptr", target_has_atomic = "cas")
-))]
+#[cfg(all(target_has_atomic = "ptr", target_has_atomic = "cas"))]
 pub mod sync;
 pub mod rc;
 pub mod raw_vec;
