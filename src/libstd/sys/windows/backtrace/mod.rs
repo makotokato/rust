@@ -239,6 +239,18 @@ impl StackFrame for c::STACKFRAME_EX {
         self.AddrFrame.Mode = c::ADDRESS_MODE::AddrModeFlat;
         c::IMAGE_FILE_MACHINE_AMD64
     }
+    #[cfg(target_arch = "aarch64")]
+    fn init(&mut self, ctx: &c::CONTEXT) -> c::DWORD {
+        self.AddrPC.Offset = ctx.Pc as u64;
+        self.AddrPC.Mode = c::ADDRESS_MODE::AddrModeFlat;
+        self.AddrStack.Offset = ctx.Sp as u64;
+        self.AddrStack.Mode = c::ADDRESS_MODE::AddrModeFlat;
+        self.AddrFrame.Offset = ctx.Fp as u64;
+        self.AddrFrame.Mode = c::ADDRESS_MODE::AddrModeFlat;
+        self.AddrReturn.Offset = ctx.Lr as u64;
+        self.AddrReturn.Mode = c::ADDRESS_MODE::AddrModeFlat;
+        c::IMAGE_FILE_MACHINE_ARM64
+    }
 
     fn get_addr(&self) -> *const u8 {
         (self.AddrPC.Offset - 1) as *const u8
@@ -270,6 +282,18 @@ impl StackFrame for c::STACKFRAME64 {
         self.AddrFrame.Mode = c::ADDRESS_MODE::AddrModeFlat;
         c::IMAGE_FILE_MACHINE_AMD64
     }
+    #[cfg(target_arch = "aarch64")]
+    fn init(&mut self, ctx: &c::CONTEXT) -> c::DWORD {
+        self.AddrPC.Offset = ctx.Pc as u64;
+        self.AddrPC.Mode = c::ADDRESS_MODE::AddrModeFlat;
+        self.AddrStack.Offset = ctx.Sp as u64;
+        self.AddrStack.Mode = c::ADDRESS_MODE::AddrModeFlat;
+        self.AddrFrame.Offset = ctx.Fp as u64;
+        self.AddrFrame.Mode = c::ADDRESS_MODE::AddrModeFlat;
+        self.AddrReturn.Offset = ctx.Lr as u64;
+        self.AddrReturn.Mode = c::ADDRESS_MODE::AddrModeFlat;
+        c::IMAGE_FILE_MACHINE_ARM64
+    }
 
     fn get_addr(&self) -> *const u8 {
         (self.AddrPC.Offset - 1) as *const u8
@@ -279,18 +303,6 @@ impl StackFrame for c::STACKFRAME64 {
 enum StackWalkVariant {
     StackWalkEx(StackWalkExFn, printing::PrintingFnsEx),
     StackWalk64(StackWalk64Fn, printing::PrintingFns64),
-}
-
-#[cfg(target_arch = "aarch64")]
-fn init_frame(frame: &mut c::STACKFRAME_EX,
-              ctx: &c::CONTEXT) -> c::DWORD {
-    frame.AddrPC.Offset = ctx.Pc as u64;
-    frame.AddrPC.Mode = c::ADDRESS_MODE::AddrModeFlat;
-    frame.AddrStack.Offset = ctx.Sp as u64;
-    frame.AddrStack.Mode = c::ADDRESS_MODE::AddrModeFlat;
-    frame.AddrFrame.Offset = ctx.Fp as u64;
-    frame.AddrFrame.Mode = c::ADDRESS_MODE::AddrModeFlat;
-    c::IMAGE_FILE_MACHINE_ARM64
 }
 
 pub struct BacktraceContext {

@@ -271,3 +271,7 @@ pub unsafe fn abort_internal() -> ! {
     asm!("int $$0x29" :: "{ecx}"(7) ::: volatile); // 7 is FAST_FAIL_FATAL_APP_EXIT
     ::intrinsics::unreachable();
 }
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn abort_internal() -> ! {
+    ::intrinsics::unreachable();
+}
