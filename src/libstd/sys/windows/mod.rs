@@ -273,5 +273,6 @@ pub unsafe fn abort_internal() -> ! {
 }
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn abort_internal() -> ! {
+    asm!("brk #0xf003" :: "{x0}"(7) ::: volatile);
     ::intrinsics::unreachable();
 }
