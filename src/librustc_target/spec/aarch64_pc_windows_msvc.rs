@@ -12,11 +12,9 @@ use spec::{LinkerFlavor, Target, TargetOptions, TargetResult};
 
 pub fn target() -> TargetResult {
     let mut base = super::windows_msvc_base::opts();
-    base.cpu = "aarch64".to_string();
     base.max_atomic_width = Some(64);
     base.has_elf_tls = true;
     base.features = "+neon,+fp-armv8".to_string();
-
     Ok(Target {
         llvm_target: "aarch64-pc-windows-msvc".to_string(),
         target_endian: "little".to_string(),
@@ -29,8 +27,8 @@ pub fn target() -> TargetResult {
         target_vendor: "pc".to_string(),
         linker_flavor: LinkerFlavor::Msvc,
         options: TargetOptions {
-        	abi_blacklist: super::arm_base::abi_blacklist(),
-        	.. base
+            abi_blacklist: super::arm_base::abi_blacklist(),
+            .. base
         },
     })
 }
